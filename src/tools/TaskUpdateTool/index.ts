@@ -1,11 +1,12 @@
 // TaskUpdateTool — 更新 TaskRecord 的进度状态
 // 仅适用于 TaskCreateTool 创建的 task- 记录，不能用于 Agent 任务
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { getState, setState } from '../../services/agent-state.js'
 import type { TaskRecordStatus } from '../../services/agent-state.js'
 
-export const TaskUpdateTool: Tool = {
+export const TaskUpdateTool = buildTool({
   name: 'TaskUpdate',
   description: `Update the status of a task record created by TaskCreateTool.
 
@@ -19,7 +20,7 @@ Call this to:
 
 Note: This tool operates on TaskRecord items (task- prefix), not Agent tasks (a prefix).
 Agent task status is updated automatically via their execution lifecycle.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -74,4 +75,4 @@ Agent task status is updated automatically via their execution lifecycle.`,
       output: JSON.stringify({ taskId, status, updated: true }),
     }
   },
-}
+})

@@ -16,6 +16,36 @@ from datetime import datetime, date, timedelta
 
 ABORT_FILE = '/tmp/.wechat_read_abort'
 
+# All screenshots live in ONE dedicated subdirectory, so cleanup is simply
+# "empty this folder" — no risk of matching unrelated temp files. A run aborted
+# with SIGKILL can't run its own cleanup, so leftovers here are swept on the next
+# start (_sweep_orphans) and by the parent process on abort (index.ts).
+# Must stay in sync with TMP_DIR in index.ts.
+TMP_DIR = os.path.join(tempfile.gettempdir(), 'wechat_ocr')
+
+def _new_tmp_png() -> str:
+    os.makedirs(TMP_DIR, exist_ok=True)
+    fd, path = tempfile.mkstemp(suffix='.png', dir=TMP_DIR)
+    os.close(fd)
+    return path
+
+def _sweep_orphans():
+    """Delete screenshots left by a previous run that was SIGKILLed before its
+    finally-cleanup could run. Skips files newer than 30s so a concurrent run's
+    in-flight screenshots are never touched."""
+    try:
+        names = os.listdir(TMP_DIR)
+    except OSError:
+        return                              # dir doesn't exist yet → nothing to sweep
+    now = time.time()
+    for name in names:
+        p = os.path.join(TMP_DIR, name)
+        try:
+            if now - os.path.getmtime(p) > 30:
+                os.unlink(p)
+        except OSError:
+            pass
+
 def _handle_stop(signum, frame):
     # SIGTERM (parent kill) 或 SIGINT (Ctrl+C 经进程组传来) → 立即干净退出。
     raise SystemExit(0)
@@ -178,6 +208,11 @@ def _make_request() -> 'Vision.VNRecognizeTextRequest':
     req.setRecognitionLanguages_(['zh-Hans', 'zh-Hant', 'en-US'])
     req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     req.setUsesLanguageCorrection_(True)
+    # Default minimumTextHeight is ~1/32 ≈ 0.031. WeChat date separators use a
+    # small gray font (~12pt); on a Retina display that's only ~1/68 of the image
+    # height — below the default and silently dropped. Lower threshold so date
+    # lines ("5月30日", "今天", "昨天") are reliably detected.
+    req.setMinimumTextHeight_(0.01)
     return req
 
 def ocr_image(path: str) -> list[str]:
@@ -228,9 +263,11 @@ def scroll_up(x: float, y: float, pixels: int = 800):
 
 
 def type_text(text: str):
-    safe = text.replace('\\', '\\\\').replace('"', '\\"')
+    # AppleScript `keystroke` does not support CJK characters — use clipboard paste.
+    subprocess.run(['pbcopy'], input=text.encode('utf-8'), capture_output=True)
+    time.sleep(0.1)
     subprocess.run(
-        ['osascript', '-e', f'tell application "System Events" to keystroke "{safe}"'],
+        ['osascript', '-e', 'tell application "System Events" to keystroke "v" using command down'],
         capture_output=True,
     )
 
@@ -282,11 +319,36 @@ def parse_date_from_line(line: str, today: date) -> date | None:
     return None
 
 
+def separator_date(line: str, today: date) -> date | None:
+    """Date of `line` ONLY if it is a standalone date separator, not a message
+    that merely contains a date-like substring.
+
+    WeChat day separators are short, centered lines holding just a date (and maybe
+    a time / weekday): "5月30日", "5月30日 10:30", "今天", "昨天 14:20",
+    "2026年5月28日". A chat message like "我3月5日去北京" also matches the date
+    regex — feeding that to the stop logic would halt scrolling on the first
+    screen. So we require the line to be (almost) entirely date/time tokens: strip
+    the recognized date/time/weekday/relative tokens and require <= 2 chars left."""
+    t = line.strip()
+    if not t:
+        return None
+    residual = re.sub(r'\d{4}年\s*\d{1,2}月\s*\d{1,2}日', '', t)
+    residual = re.sub(r'\d{1,2}月\s*\d{1,2}日', '', residual)
+    residual = re.sub(r'\d{1,2}:\d{2}', '', residual)
+    residual = re.sub(r'(?:星期|周)\s*[一二三四五六日天]', '', residual)
+    for w in ('今天', '昨天', '前天', '上午', '下午', '中午', '晚上', '凌晨'):
+        residual = residual.replace(w, '')
+    residual = re.sub(r'\s+', '', residual)
+    if len(residual) > 2:          # too much non-date text → it's a real message
+        return None
+    return parse_date_from_line(t, today)
+
+
 def crossed_target(lines: list[str], target_date: date, today: date) -> bool:
-    """True once any separator strictly older than target appears — proves the
+    """True once a separator strictly older than target appears — proves the
     entire [target, today] window now sits above it and has been captured."""
     for line in lines:
-        d = parse_date_from_line(line, today)
+        d = separator_date(line, today)
         if d is not None and d < target_date:
             return True
     return False
@@ -302,7 +364,7 @@ def trim_to_window(lines: list[str], target_date: date, today: date) -> list[str
     first_in_window = None
     saw_older = False
     for idx, line in enumerate(lines):
-        d = parse_date_from_line(line, today)
+        d = separator_date(line, today)
         if d is None:
             continue
         if d < target_date:
@@ -328,8 +390,7 @@ def get_recent_contacts(bounds: dict, scale: float, limit: int = 20) -> list[str
     只取侧边栏左 35% 区域、y > 10% 且 y < 95% 的文字；
     过滤掉纯时间戳、纯数字、极短噪声。
     """
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-        tmp = f.name
+    tmp = _new_tmp_png()
     try:
         screenshot_bounds(bounds, scale, tmp)
         boxes = ocr_image_with_boxes(tmp)
@@ -360,83 +421,111 @@ def get_recent_contacts(bounds: dict, scale: float, limit: int = 20) -> list[str
 
 # ── Navigation ─────────────────────────────────────────────────────────────────
 
-def navigate_to_contact(contact: str, bounds: dict, scale: float) -> dict:
-    """
-    确认微信在最前 → Escape → 点搜索框 → 输入名字 →
-    Phase 1: Down+Enter 选中并 OCR 验证标题栏 →
-    Phase 2 (fallback): OCR 搜索结果包围框 → 滚动点击。
-    返回最新的窗口 bounds。微信不在最前则抛 WeChatNotFront（不发送任何事件）。
-    """
-    # 关键安全门：确认微信确实在最前并取最新坐标，否则中止——绝不向 Chrome 等窗口发事件。
+def _name_at_boundary(text: str, contact: str) -> bool:
+    """True if `text` is `contact` followed by a name BOUNDARY (or nothing).
+
+    Accepts "子淇", "子淇 11:30", "子淇（3）", "子淇⊙" — the name then a non-name
+    char (whitespace / punctuation / icon), which is how OCR commonly merges a
+    header or list row. Rejects "子淇明" (next char is another CJK char → a
+    different, longer name) so "张三" never matches the group "张三李四群"."""
+    t = text.strip()
+    if not t.startswith(contact):
+        return False
+    if len(t) == len(contact):
+        return True
+    nxt = t[len(contact)]
+    # A following CJK char / letter / digit means the name continues → different name.
+    return not (nxt.isalnum() or '一' <= nxt <= '鿿')
+
+
+def _header_matches(contact: str, bounds: dict, scale: float) -> bool:
+    """True iff the right-panel chat header shows this contact's name.
+
+    The header sits in the top strip of the RIGHT panel. We require cx > 0.28 so a
+    sidebar entry (left column) can't satisfy it — only the actual open-chat header
+    counts — and cy < 0.30 to cover taller title areas."""
+    tmp = _new_tmp_png()
+    try:
+        screenshot_bounds(bounds, scale, tmp)
+        boxes = ocr_image_with_boxes(tmp)
+    finally:
+        try: os.unlink(tmp)
+        except OSError: pass
+    for text, cx, cy in boxes:
+        if cx > 0.28 and cy < 0.30 and _name_at_boundary(text, contact):
+            return True
+    return False
+
+
+def navigate_to_contact(contact: str, bounds: dict, scale: float) -> tuple[dict, bool]:
+    """Open `contact`'s chat via keyboard search; verify the header every time.
+
+    Strategy: focus search box → paste name → press Enter (optionally after a
+    Down arrow or two, since WeChat may pre-select a section header) → OCR the
+    chat header to confirm we actually opened THIS contact. We never click search
+    results by OCR coordinates and never blindly press Enter and read whatever
+    chat happens to be open — both caused wrong-contact reads.
+
+    Returns (latest_bounds, found). found=False means the contact could not be
+    confirmed open; the caller should skip it rather than read a wrong chat.
+    Raises WeChatNotFront if WeChat can't be brought frontmost (no events sent)."""
     fresh = ensure_wechat_front(bounds)
     if fresh is None:
         raise WeChatNotFront()
     bounds = fresh
 
-    key_code(53)  # Escape — dismiss any open overlay
-    time.sleep(0.3)
-
     wx = bounds['X']
-    wy = bounds['Y']
     ww = bounds['Width']
-    wh = bounds['Height']
 
     def setup_search():
+        """Dismiss any open chat, focus the search box, clear it, paste the name."""
         _check_abort()
-        require_front()                    # 每次输入前再次确认微信在最前
-        mouse_click(wx + ww * 0.15, wy + 45)
+        require_front()
+        key_code(53)                        # Escape — close any open overlay/chat
+        time.sleep(0.3)
+        require_front()
+        mouse_click(wx + ww * 0.15, bounds['Y'] + 45)   # click search box (sidebar top)
         time.sleep(0.5)
         require_front()
-        subprocess.run(
+        subprocess.run(                     # Cmd+A — select any residual text
             ['osascript', '-e', 'tell application "System Events" to keystroke "a" using command down'],
             capture_output=True,
         )
         time.sleep(0.15)
         require_front()
-        type_text(contact)
-        time.sleep(1.5)  # wait for search results
+        type_text(contact)                  # clipboard paste (supports CJK)
+        time.sleep(1.5)                     # wait for the result list to populate
 
-    setup_search()
-
-    def try_keyboard_select() -> bool:
-        """Down+Enter selects the first search result; verify via OCR of chat header."""
+    # ── Primary: keyboard search ────────────────────────────────────────────
+    # Open the top result with 0, then 1, then 2 Down-arrows; verify each.
+    # Re-search before each attempt so a previous miss (which may have opened a
+    # wrong chat) is undone and selection starts fresh.
+    for n_down in (0, 1, 2):
+        setup_search()
         require_front()
-        key_code(125)  # Down arrow — move selection to first result
-        time.sleep(0.3)
-        key_code(36)   # Enter — open it
+        for _ in range(n_down):
+            key_code(125)                   # Down — advance selection
+            time.sleep(0.25)
+        key_code(36)                        # Enter — open the selected result
         time.sleep(1.0)
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-            tmp = f.name
-        try:
-            screenshot_bounds(bounds, scale, tmp)
-            boxes = ocr_image_with_boxes(tmp)
-        finally:
-            try: os.unlink(tmp)
-            except OSError: pass
-        # Contact name should appear in the chat header (right panel, top 20% of window).
-        # Use cx_norm > 0.3 to include narrow-sidebar layouts.
-        for text, cx_norm, cy_norm in boxes:
-            if contact in text and cx_norm > 0.3 and cy_norm < 0.20:
-                return True
-        return False
+        if _header_matches(contact, bounds, scale):
+            return bounds, True
 
-    # Phase 1: keyboard-first — faster; works when WeChat highlights the right result
-    if try_keyboard_select():
-        return bounds
-
-    # Phase 2: OCR + scroll fallback — re-enter search and scan results manually
-    setup_search()
-
+    # ── Fallback: scroll the search-filtered left list and click the name ─────
+    # Reached only if Enter never landed on the right contact. The list is still
+    # filtered by the search text, so it holds few entries; we scroll to the top
+    # then scan downward, clicking the first row whose name EXACTLY matches and
+    # verifying the header. Scanning continues until the list stops moving (not a
+    # fixed page count), so it won't give up after just a few contacts.
     sidebar_x = wx + ww * 0.15
-    sidebar_y = wy + wh * 0.45
 
     def sidebar_scroll(direction: int, px: int = 300):
-        """direction: +1 = up (older/top), -1 = down (newer/bottom)"""
+        """direction: +1 = up (toward top), -1 = down."""
         _check_abort()
         if not guard_front():
             raise WeChatNotFront()
         import Quartz as Q
-        p = Q.CGPoint(sidebar_x, sidebar_y)
+        p = Q.CGPoint(sidebar_x, bounds['Y'] + bounds['Height'] * 0.45)
         Q.CGEventPost(Q.kCGHIDEventTap,
                       Q.CGEventCreateMouseEvent(None, Q.kCGEventMouseMoved, p, 0))
         time.sleep(0.05)
@@ -445,79 +534,52 @@ def navigate_to_contact(contact: str, bounds: dict, scale: float) -> dict:
         CGEventPost(kCGHIDEventTap, ev)
         time.sleep(0.5)
 
-    def try_find_and_click() -> bool:
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-            tmp = f.name
+    def left_boxes() -> list[tuple[str, float, float]]:
+        tmp = _new_tmp_png()
         try:
             screenshot_bounds(bounds, scale, tmp)
-            boxes = ocr_image_with_boxes(tmp)
+            return ocr_image_with_boxes(tmp)
         finally:
             try: os.unlink(tmp)
             except OSError: pass
 
-        for text, cx_norm, cy_norm in boxes:
-            stripped = text.strip()
-            # WeChat search results OCR can merge the name with a message preview:
-            # "李嘉俊" (exact) or "李嘉俊（3）" or "李嘉俊 昨天来了" etc.
-            # Accept exact match OR name followed by a non-name character.
-            is_name_match = (
-                stripped == contact
-                or (stripped.startswith(contact)
-                    and len(stripped) > len(contact)
-                    and stripped[len(contact)] in ' \t（【[（「《')
-            )
-            if is_name_match and cx_norm < 0.35:
-                screen_x = wx + cx_norm * ww
-                screen_y = wy + cy_norm * wh
-                if screen_y > wy + 70:
-                    require_front()
-                    mouse_click(screen_x, screen_y)
-                    time.sleep(1.0)
-                    return True
-        return False
-
-    # Step 1: scroll to top of search results
-    for _ in range(5):
+    setup_search()
+    for _ in range(6):                      # scroll to the top of the result list
         sidebar_scroll(+1, 400)
 
-    clicked = False
+    prev_set: frozenset | None = None
+    stale = 0
+    for _ in range(25):                     # generous cap; bottom-detection ends it sooner
+        boxes = left_boxes()
+        for text, cx, cy in boxes:
+            # Left column only (cx < 0.35); name at a boundary (badge/whitespace ok).
+            if cx < 0.35 and _name_at_boundary(text, contact):
+                sy = bounds['Y'] + cy * bounds['Height']
+                if sy > bounds['Y'] + 70:   # below the search box itself
+                    require_front()
+                    mouse_click(wx + cx * ww, sy)
+                    time.sleep(1.0)
+                    # Verify; if this row was a false positive, give up (caller skips).
+                    return bounds, _header_matches(contact, bounds, scale)
+        # No match on screen → stop once the list stops scrolling (reached bottom).
+        cur = frozenset(s for s in (t.strip() for t, cx, cy in boxes if cx < 0.35)
+                        if len(s) >= 2)
+        if prev_set is not None and _jaccard(cur, prev_set) > 0.9:
+            stale += 1
+            if stale >= 2:
+                break
+        else:
+            stale = 0
+        prev_set = cur
+        sidebar_scroll(-1, 250)
 
-    # Step 2: scan downward, up to 6 pages
-    for _ in range(6):
-        if try_find_and_click():
-            clicked = True
-            break
-        sidebar_scroll(-1, 250)  # scroll down to see more results
-
-    if not clicked:
-        # Last resort: press Enter on whatever WeChat has highlighted
-        require_front()
-        key_code(36)
-        time.sleep(1.0)
-        # Verify we landed on the right contact; warn if not (but continue anyway —
-        # the scroll loop will collect whatever chat is open and the caller can check
-        # the nav_verified field).
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-            _tmp = f.name
-        try:
-            screenshot_bounds(bounds, scale, _tmp)
-            _boxes = ocr_image_with_boxes(_tmp)
-        finally:
-            try: os.unlink(_tmp)
-            except OSError: pass
-        nav_ok = any(contact in t and cx > 0.3 and cy < 0.20 for t, cx, cy in _boxes)
-        if not nav_ok:
-            # Could not confirm navigation — surface a warning via a special key
-            # that WechatReadTool.ts will surface in the section meta.
-            import sys as _sys
-            _sys.stderr.write(f'[nav_warn] Could not confirm navigation to "{contact}" after last-resort Enter\n')
-
-    return bounds
+    return bounds, False
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
+    _sweep_orphans()   # clean any screenshots leaked by a previously SIGKILLed run
     raw  = sys.stdin.read().strip()
     args = json.loads(raw) if raw else {}
 
@@ -550,17 +612,15 @@ def main():
     if target_date is None and contact:
         target_date = today - timedelta(days=7)
 
-    # Scroll budget is a SAFETY CAP, not the primary terminator (date-stop and
-    # top-stop fire first). Scale it to the day span — ×3 gives ~3 screens/day
-    # which is enough for active chats; hard ceiling keeps worst-case runtime
-    # under ~2 min/contact even when OCR misses every date separator.
+    # Scroll budget: safety cap only — date-stop and top-stop are primary.
+    # ×7 per day gives ~7 screens/day at 600px/scroll; for 30 days → 210 scrolls.
     if 'max_scrolls' in args:
         max_scrolls = int(args['max_scrolls'])
     elif target_date is not None:
         span = (today - target_date).days
-        max_scrolls = min(90, max(20, span * 3))
+        max_scrolls = min(150, max(30, span * 3))
     else:
-        max_scrolls = 20
+        max_scrolls = 30
 
     if not ensure_wechat_visible():
         print(json.dumps({'error': '无法打开/前置微信窗口（等待 ~10s）。请确认微信已安装并已登录。'}))
@@ -573,7 +633,7 @@ def main():
 
     if navigate and contact:
         try:
-            bounds = navigate_to_contact(contact, bounds, scale) or bounds
+            bounds, found = navigate_to_contact(contact, bounds, scale)
         except WeChatNotFront:
             # 微信无法置于最前——绝不向其他窗口发送点击/键盘，直接安全退出。
             print(json.dumps({
@@ -581,6 +641,14 @@ def main():
                 'lost_focus': True,
             }, ensure_ascii=False))
             sys.exit(1)
+        if not found:
+            # Couldn't confirm we opened this contact — do NOT scroll-read a wrong
+            # chat. Report not-found so the caller skips to the next contact.
+            print(json.dumps({
+                'error': f'未找到联系人「{contact}」，已跳过（未读取任何聊天记录）。',
+                'nav_failed': True,
+            }, ensure_ascii=False))
+            return
         window = find_wechat_window() or window
         bounds = window.get('kCGWindowBounds', bounds)
 
@@ -619,21 +687,34 @@ def main():
 
     all_lines: list[str] = []
     tmp_files: list[str] = []
+    seen_seps: list[str] = []          # diagnostic: every date separator OCR detected
     reached_target = False
     hit_top = False
     lost_focus = False
     prev_set: set[str] | None = None   # detect when scroll has no effect (top of chat)
     no_change_count = 0
-    date_drought = 0                   # consecutive screens with zero parseable dates
 
     def refocus() -> bool:
-        """Re-assert WeChat as frontmost and refresh geometry before each action.
-        Returns False if WeChat is gone (caller should stop)."""
+        """Refresh WeChat geometry before each scroll/screenshot.
+
+        Two distinct cases:
+        - Window gone (minimized / closed): try to restore via ensure_wechat_visible.
+        - Window visible but user switched away: stop immediately — never hijack focus.
+        """
         nonlocal bounds, chat_cx, chat_cy
-        cur = ensure_wechat_front(bounds)
-        if cur is None:
+        win = find_wechat_window()
+        if win is None:
+            # Window minimized or WeChat closed — attempt to restore once.
+            if not ensure_wechat_visible():
+                return False
+            win = find_wechat_window()
+            if win is None or not is_wechat_frontmost():
+                return False
+        elif not is_wechat_frontmost():
+            # User deliberately switched to another app — stop scrolling.
             return False
-        if cur != bounds:                      # moved or resized → recompute targets
+        cur = win.get('kCGWindowBounds', bounds)
+        if cur != bounds:
             bounds  = cur
             chat_cx = bounds['X'] + bounds['Width']  * 0.65
             chat_cy = bounds['Y'] + bounds['Height'] * 0.5
@@ -652,20 +733,26 @@ def main():
                 lost_focus = True
                 break
 
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                tmp_path = f.name
+            tmp_path = _new_tmp_png()
             tmp_files.append(tmp_path)
 
             if not screenshot_bounds(bounds, scale, tmp_path):
                 break
 
-            lines = ocr_image(tmp_path)
-            # Chat-area lines only (skip short sidebar/name fragments) for the
-            # top-of-chat fingerprint.
-            chat_set = set(l for l in lines if len(l) > 6)
+            boxes = ocr_image_with_boxes(tmp_path)
+            lines = [text for text, cx, cy in boxes]
+            # Top-of-chat fingerprint: only chat area (cx > 0.35, right ~65%).
+            # Sidebar contact names and timestamps (cx ≤ 0.35) refresh every render
+            # even when chat content hasn't scrolled — including them makes Jaccard
+            # similarity stay below threshold and the loop never detects "top".
+            chat_set = set(text for text, cx, cy in boxes if cx > 0.35 and len(text) > 6)
 
-            # Parse all dates visible in the current screenshot
-            screen_dates = [d for d in (parse_date_from_line(l, today) for l in lines) if d is not None]
+            # Dates from standalone separators only (ignore dates inside messages)
+            screen_dates = [d for d in (separator_date(l, today) for l in lines) if d is not None]
+            for _d in screen_dates:
+                iso = _d.isoformat()
+                if iso not in seen_seps:
+                    seen_seps.append(iso)
 
             # Prepend older content (all_lines stays chronological: oldest→newest)
             all_lines = lines + all_lines
@@ -682,18 +769,9 @@ def main():
                 break
 
             if screen_dates:
-                date_drought = 0
                 # (B) Screen-max check: the NEWEST date visible on the current
-                #     screen is already older than the target window. This triggers
-                #     when we're deep inside an old day and (A) missed the separator.
+                #     screen is already older than the target window.
                 if max(screen_dates) < target_date:
-                    reached_target = True
-                    break
-            else:
-                date_drought += 1
-                # (C) Date drought: 8 consecutive screens with no parseable date
-                #     means we're in a dense message region far past target. Stop.
-                if date_drought >= 8:
                     reached_target = True
                     break
 
@@ -702,7 +780,7 @@ def main():
             # misread character).
             if prev_set is not None and _jaccard(chat_set, prev_set) > 0.9:
                 no_change_count += 1
-                if no_change_count >= 2:
+                if no_change_count >= 3:
                     hit_top = True
                     break
             else:
@@ -715,7 +793,7 @@ def main():
                 if not refocus():
                     lost_focus = True
                     break
-                scroll_up(chat_cx, chat_cy, pixels=300)
+                scroll_up(chat_cx, chat_cy, pixels=600)
                 time.sleep(0.6)
 
     finally:
@@ -748,6 +826,7 @@ def main():
         'hit_top': hit_top,
         'lost_focus': lost_focus,
         'scroll_count': len(tmp_files) - 1,
+        'separators': seen_seps,          # date separators OCR actually detected
     }, ensure_ascii=False))
 
 

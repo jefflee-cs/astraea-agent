@@ -47,13 +47,24 @@ function detectProvider(): Provider {
   return 'anthropic'
 }
 
+// 输出 token 上限 — 旧值统一 8192，对自包含 HTML/SVG 这类大产物会自我缩水或中途截断。
+// 各 provider 默认提到对应模型的真实上限；可用 <PROVIDER>_MAX_TOKENS 环境变量覆盖。
+function maxTokensFrom(envKey: string, fallback: number): number {
+  const raw = Number(process.env[envKey])
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback
+}
+
+// 提前解析，供 maxTokens 的模型相关默认值复用（gpt-5.x vs gpt-4o 输出预算不同）
+const openaiModel = process.env.OPENAI_MODEL ?? 'gpt-4o'
+
 export const config = {
   provider: detectProvider() as Provider,
 
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY ?? '',
     model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
-    maxTokens: 8192,
+    // Sonnet 4.x 支持 64k 输出；32k 与 Claude Code 对齐，留足大文件余量。
+    maxTokens: maxTokensFrom('ANTHROPIC_MAX_TOKENS', 32000),
   },
 
   // DeepSeek — OpenAI-compatible API
@@ -61,22 +72,27 @@ export const config = {
     apiKey: process.env.DEEPSEEK_API_KEY ?? '',
     model: process.env.DEEPSEEK_MODEL ?? 'deepseek-chat',
     baseUrl: 'https://api.deepseek.com',
-    maxTokens: 8192,
+    // deepseek-chat 输出硬上限即 8192。
+    maxTokens: maxTokensFrom('DEEPSEEK_MAX_TOKENS', 8192),
   },
 
   // Ollama（本地）
   ollama: {
     baseUrl: process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434/v1',
     model: process.env.OLLAMA_MODEL ?? 'qwen2.5:7b',
-    maxTokens: 8192,
+    // 本地模型受显存/上下文限制，保守默认，按需用 OLLAMA_MAX_TOKENS 调高。
+    maxTokens: maxTokensFrom('OLLAMA_MAX_TOKENS', 8192),
   },
 
   // OpenAI（云端）
   openai: {
     apiKey: process.env.OPENAI_API_KEY ?? '',
-    model: process.env.OPENAI_MODEL ?? 'gpt-4o',
+    model: openaiModel,
     baseUrl: process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
-    maxTokens: 8192,
+    // gpt-5.x 支持 128K 输出；给它 32k 单次产物余量（足够大型自包含 HTML），gpt-4o 维持 16384 硬上限。
+    maxTokens: maxTokensFrom('OPENAI_MAX_TOKENS', /^gpt-5/i.test(openaiModel) ? 32000 : 16384),
+    // gpt-5.x 推理强度：none|low|medium|high|xhigh，默认 medium。仅对 reasoning 模型生效。
+    reasoningEffort: process.env.OPENAI_REASONING_EFFORT?.trim() || undefined,
   },
 }
 

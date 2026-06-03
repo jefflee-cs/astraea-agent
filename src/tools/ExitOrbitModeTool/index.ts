@@ -4,13 +4,14 @@
 //   2. 通过 AskUserQuestion bridge 向用户弹出审批
 //   3. 用户批准 → restorePreMode()，返回完整计划文本给模型
 //   4. 用户拒绝 → 保持 orbit 模式，返回拒绝消息
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { restorePreMode, getMode } from '../../state/sessionMode.js'
 import { getPlanFilePath, getPlanSlug } from '../../utils/planSlug.js'
 import { ask } from '../AskUserQuestionTool/bridge.js'
 import { writeFileSync } from 'node:fs'
 
-export const ExitOrbitModeTool: Tool = {
+export const ExitOrbitModeTool = buildTool({
   name: 'ExitOrbitMode',
   description: `Exit orbit mode by presenting your complete plan for user approval.
 
@@ -23,7 +24,8 @@ The plan will be:
 4. If rejected: you remain in orbit mode to revise the plan
 
 The plan parameter must contain your complete, structured implementation plan.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -102,4 +104,4 @@ The plan parameter must contain your complete, structured implementation plan.`,
       }
     }
   },
-}
+})

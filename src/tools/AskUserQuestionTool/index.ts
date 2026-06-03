@@ -4,10 +4,11 @@
 // REPL 模式：通过 bridge 暂停 query 循环，等待用户输入
 // CLI 模式：无监听者时立即返回（模型自行判断）
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { ask } from './bridge.js'
 
-export const AskUserQuestionTool: Tool = {
+export const AskUserQuestionTool = buildTool({
   name: 'AskUserQuestion',
   description: `Ask the user a clarifying question and wait for their answer.
 
@@ -24,7 +25,8 @@ Do NOT use for:
 
 Bias toward action. If unsure between two reasonable approaches, pick one and go.
 Ask at most once per task. Never ask about things the user can see you doing.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -35,7 +37,8 @@ Ask at most once per task. Never ask about things the user can see you doing.`,
       options: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Optional list of suggested answers to show the user',
+        minItems: 3,
+        description: 'Suggested answers shown as a ↑↓ arrow-key selector. In counsel mode this is required and must have at least 3 choices. If only 2 natural options exist, add a meaningful third.',
       },
     },
     required: ['question'],
@@ -55,4 +58,4 @@ Ask at most once per task. Never ask about things the user can see you doing.`,
 
     return { output: userAnswer }
   },
-}
+})

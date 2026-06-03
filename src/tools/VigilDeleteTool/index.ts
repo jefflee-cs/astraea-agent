@@ -1,14 +1,15 @@
 // VigilDeleteTool — 取消定时任务
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { removeTask, readTasks } from '../../utils/vigilTasks.js'
 
-export const VigilDeleteTool: Tool = {
+export const VigilDeleteTool = buildTool({
   name: 'VigilDelete',
   description: `Cancel a scheduled vigil task by ID.
 
 When all tasks are deleted, the background daemon will automatically exit.
 Use VigilList to find task IDs.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -39,4 +40,4 @@ Use VigilList to find task IDs.`,
       ].join('\n'),
     }
   },
-}
+})

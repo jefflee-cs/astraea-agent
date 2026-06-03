@@ -42,11 +42,15 @@ export type Message = UserMessage | AssistantMessage
 
 // ───────────────────────────────── 流式事件 ──────────────────────────────────
 
+// 模型停止本轮输出的原因。'max_tokens' 表示撞到输出上限被截断（产物可能不完整）。
+export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | 'other'
+
 // 我们自己的流事件，比 SDK 原始事件更精简
 export type StreamEvent =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'message_stop'; usage: { input_tokens: number; output_tokens: number } }
+  // incomplete: 工具入参 JSON 在累积过程中被截断、parse 失败 —— 不可执行，需让模型重试
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; incomplete?: boolean }
+  | { type: 'message_stop'; usage: { input_tokens: number; output_tokens: number }; stopReason?: StopReason }
 
 // ───────────────────────────────── 工具函数 ──────────────────────────────────
 

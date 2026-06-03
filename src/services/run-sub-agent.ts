@@ -110,7 +110,9 @@ export async function runSubAgent(
           isError = true
         } else {
           try {
-            const res = await tool.call(toolUse.input, { mode: 'default' })
+            // 子 agent 无交互 TTY：isInteractive:false → 工具遇 ask 一律 fail-closed deny，绝不挂起
+            // （Permission & Safety Technical Spec §3.0）
+            const res = await tool.call(toolUse.input, { mode: 'default', isInteractive: false, agentId })
             output = res.output
             isError = res.isError ?? false
           } catch (err) {

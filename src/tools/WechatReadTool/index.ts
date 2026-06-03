@@ -1,25 +1,44 @@
 import { join } from 'node:path'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, readdirSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { checkWechatSetup } from '../../utils/wechatSetupGuard.js'
 import type { WechatSettings, WechatOrganizeMode } from '../../settings.js'
 
 const SCRIPT     = join(import.meta.dir, 'screenshot_ocr.py')
 const ABORT_FILE = '/tmp/.wechat_read_abort'
+// Dedicated screenshot directory — must stay in sync with TMP_DIR in
+// screenshot_ocr.py. All OCR screenshots live here, so cleanup is just emptying it.
+const TMP_DIR = join(tmpdir(), 'wechat_ocr')   // same $TMPDIR the child inherits
+
+/** Delete every leftover OCR screenshot from the dedicated dir.
+ *  A SIGKILLed child can't run its own finally-cleanup, so on abort/exit this
+ *  parent (which stays alive) wipes them — no PNGs left behind on termination. */
+function sweepScreenshots() {
+  try {
+    for (const name of readdirSync(TMP_DIR)) {
+      try { unlinkSync(join(TMP_DIR, name)) } catch { /* already gone */ }
+    }
+  } catch { /* dir absent → nothing to clean */ }
+}
 
 // 所有正在运行的 python 子进程。abortWechatRead() 会直接 kill 它们——
 // 仅靠 abort 文件不够：文件只在滚动循环边界被检查，且子进程可能孤儿化。
 const running = new Set<import('bun').Subprocess>()
 
-/** 立即停止所有进行中的微信读取：写 abort 文件 + 直接杀掉子进程。 */
+/** 立即停止所有进行中的微信读取：写 abort 文件 + 直接杀掉子进程 + 清理残留截图。 */
 export function abortWechatRead() {
   try { writeFileSync(ABORT_FILE, '') } catch { /* best effort */ }
   for (const p of running) { try { p.kill('SIGKILL') } catch { /* already dead */ } }
   running.clear()
+  sweepScreenshots()   // 用户终止 → 删除所有残留截图
 }
-
-// 兜底：Astraea 进程因任何原因退出时，杀掉所有子进程，杜绝孤儿进程继续操作鼠标键盘。
-const _killChildren = () => { for (const p of running) { try { p.kill('SIGKILL') } catch { /* dead */ } } }
+// 兜底：Astraea 进程因任何原因退出时，杀掉所有子进程并清理截图，杜绝孤儿进程与残留文件。
+const _killChildren = () => {
+  for (const p of running) { try { p.kill('SIGKILL') } catch { /* dead */ } }
+  sweepScreenshots()
+}
 process.on('exit', _killChildren)
 process.on('SIGINT', _killChildren)
 process.on('SIGTERM', _killChildren)
@@ -52,7 +71,6 @@ async function runOcr(args: Record<string, unknown>, signal?: AbortSignal): Prom
     signal?.removeEventListener('abort', onAbort)
   }
 }
-
 // ── Summarization prompt builder ──────────────────────────────────────────────
 
 function buildSummarizationPrompt(
@@ -109,7 +127,6 @@ ${organizeInstructions}
 
 请输出一份清晰的 Markdown 文档，包含以上所有章节，内容要简洁有力，不要冗余。`
 }
-
 function buildOrganizeSections(modes: WechatOrganizeMode[], contacts: string[]): string {
   const sections: string[] = []
 
@@ -118,7 +135,6 @@ function buildOrganizeSections(modes: WechatOrganizeMode[], contacts: string[]):
 
 按日期从新到旧排列所有重要内容（每天一个小节，只包含有实质内容的日期）。`)
   }
-
   if (modes.includes('contacts')) {
     const contactList = contacts.map(c => `- **${c}**`).join('\n')
     sections.push(`### ${sections.length + 4}、按联系人分类
@@ -126,30 +142,25 @@ function buildOrganizeSections(modes: WechatOrganizeMode[], contacts: string[]):
 对每位联系人的沟通做独立小结：
 ${contactList}`)
   }
-
   if (modes.includes('topics')) {
     sections.push(`### ${sections.length + 4}、按主题分类
 
 自动识别讨论主题（如：工作安排、项目讨论、家庭事务、财务、健康……），将相关内容归入对应主题。每个主题至少有 2 条有意义的内容才列出。`)
   }
-
   if (modes.includes('decisions')) {
     sections.push(`### ${sections.length + 4}、决策记录
 
 提取所有明确的决定（谁决定了什么、何时决定），格式：
 - [决定内容] —— 由 **[决策人]** 于 [时间] 确定`)
   }
-
   if (modes.includes('promises')) {
     sections.push(`### ${sections.length + 4}、承诺追踪
 
 提取聊天中出现的所有承诺（谁承诺了什么），格式：
 - [承诺内容] —— **[承诺人]** 于 [时间] 承诺，状态：[已兑现 / 待兑现 / 未知]`)
   }
-
   return sections.join('\n\n')
 }
-
 // ── Contact resolution ────────────────────────────────────────────────────────
 
 async function resolveContacts(settings: WechatSettings, signal?: AbortSignal): Promise<string[] | { error: string }> {
@@ -164,10 +175,9 @@ async function resolveContacts(settings: WechatSettings, signal?: AbortSignal): 
   if (!contacts?.length) return { error: 'Could not detect contacts from WeChat sidebar.' }
   return scope.type === 'top' ? contacts.slice(0, scope.k) : contacts
 }
-
 // ── Tool definition ───────────────────────────────────────────────────────────
 
-export const WechatReadTool: Tool = {
+export const WechatReadTool = buildTool({
   name: 'WechatRead',
   description: `Read WeChat chat messages via screenshot + macOS Vision OCR.
 Does not require Accessibility API — works with any WeChat version.
@@ -181,7 +191,7 @@ call with { use_settings: true } to read from configured scope and generate
 a structured summary.
 
 Requires: WeChat open and visible on screen.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -229,22 +239,40 @@ Requires: WeChat open and visible on screen.`,
         .toISOString().slice(0, 10)
 
       const sections: string[] = []
+      let readCount = 0          // contacts we actually read messages from
       for (const contact of contactsResult) {
         if (_ctx.abortSignal?.aborted) break   // Ctrl+C：停止读取剩余联系人
         // Omit max_scrolls — let the Python side scale the safety cap to the day span.
         const result = await runOcr({ contact, navigate: true, target_date }, _ctx.abortSignal)
         if (result['error']) {
+          // 未找到该联系人（或微信失焦等）→ 记录并继续找下一个
           sections.push(`## ${contact}\nError: ${result['error']}`)
           continue
         }
+        const seps = (result['separators'] as string[] | undefined) ?? []
+        const sepNote = `, 检测到日期分隔符: ${seps.length ? seps.join('/') : '无(OCR未读到任何日期)'}`
         const text = String(result['text'] ?? '')
         if (!text.trim()) {
-          sections.push(`## ${contact}\n（未找到消息）`)
+          // Surface why it was empty — most often the scroll loop stopped on the
+          // first screen (scroll_count 0 + reached_target) because the newest
+          // messages are already older than the window, or it lost focus.
+          const why = `[滚动次数: ${result['scroll_count'] ?? 0}, 到达目标日期: ${result['reached_target'] ?? false}, 到顶: ${result['hit_top'] ?? false}, 失焦: ${result['lost_focus'] ?? false}${sepNote}]`
+          sections.push(`## ${contact}\n（未读到窗口内消息）${why}`)
           continue
         }
-        const focusNote = result['lost_focus'] ? ', ⚠️微信被切走导致读取提前结束' : ''
-        const meta = `[滚动次数: ${result['scroll_count'] ?? 0}, 到达目标日期: ${result['reached_target'] ?? false}${focusNote}]`
+        readCount++
+        const focusNote = result['lost_focus'] ? ', ⚠️微信失焦，读取提前结束' : ''
+        const topNote   = result['hit_top']    ? ', ✅已到达对话最顶部'        : ''
+        const meta = `[滚动次数: ${result['scroll_count'] ?? 0}, 到达目标日期: ${result['reached_target'] ?? false}${topNote}${focusNote}${sepNote}]`
         sections.push(`## ${contact}\n${meta}\n${text}`)
+      }
+
+      // 一个联系人都没读到 → 直接结束，不再生成摘要
+      if (readCount === 0) {
+        return {
+          output: ['未能读取任何联系人的聊天记录，任务结束。', '', sections.join('\n\n')].join('\n'),
+          isError: true,
+        }
       }
 
       const rawText = sections.join('\n\n---\n\n')
@@ -284,10 +312,12 @@ Requires: WeChat open and visible on screen.`,
         sections.push(`## ${contact}\nNo text found.`)
         continue
       }
-      const meta = `[scrolls: ${result['scroll_count'] ?? 0}, reached_target: ${result['reached_target'] ?? false}]`
+      const focusNote = result['lost_focus'] ? ', ⚠️lost_focus' : ''
+      const topNote   = result['hit_top']    ? ', ✅hit_top'     : ''
+      const meta = `[scrolls: ${result['scroll_count'] ?? 0}, reached_target: ${result['reached_target'] ?? false}${topNote}${focusNote}]`
       sections.push(`## ${contact}\n${meta}\n${text}`)
     }
 
     return { output: sections.join('\n\n---\n\n') }
   },
-}
+})

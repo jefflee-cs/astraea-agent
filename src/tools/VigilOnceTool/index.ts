@@ -1,11 +1,12 @@
 // VigilOnceTool — 一次性延迟任务：N 分钟后执行一次，执行完自动删除
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { addTask, ensureDaemon, type VigilTask } from '../../utils/vigilTasks.js'
 import { ask } from '../AskUserQuestionTool/bridge.js'
 import { randomUUID } from 'node:crypto'
 import { promptNeedsWechat, checkWechatSetup } from '../../utils/wechatSetupGuard.js'
 
-export const VigilOnceTool: Tool = {
+export const VigilOnceTool = buildTool({
   name: 'VigilOnce',
   description: `Schedule a ONE-TIME task to run after a delay (in minutes). The task fires exactly once, then is automatically removed.
 
@@ -17,7 +18,7 @@ Use this when the user says things like:
 Do NOT use for recurring tasks ("every day", "each morning", "weekly") — use VigilSchedule instead.
 
 CRITICAL — output NOTHING before calling this tool. No "I will schedule", no "Proceeding", no summary, no acknowledgement. The tool itself shows a confirmation dialog that handles all user interaction. Any text output before the tool call will confuse the user into thinking the task was already scheduled before they can confirm.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -95,4 +96,4 @@ CRITICAL — output NOTHING before calling this tool. No "I will schedule", no "
       ].join('\n'),
     }
   },
-}
+})

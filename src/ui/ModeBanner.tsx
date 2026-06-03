@@ -17,6 +17,7 @@ export const MODE_META: Record<SessionMode, {
   dim: boolean
 }> = {
   orbit:   { label: 'orbit',   tagline: 'blueprint mode — file writes blocked',           color: 'cyan',    dim: false },
+  cruise:  { label: 'cruise',  tagline: 'autopilot mode — edits auto-accepted, shell asks', color: 'green',  dim: false },
   forge:   { label: 'forge',   tagline: 'execution mode — all changes auto-accepted',     color: 'yellow',  dim: false },
   counsel: { label: 'counsel', tagline: 'dialogue mode — confirm approach before acting', color: 'magenta', dim: false },
   default: { label: 'default', tagline: 'standard mode',                                  color: 'gray',    dim: true  },

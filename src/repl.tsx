@@ -20,7 +20,6 @@ const model =
       : config.anthropic.model
 
 process.stderr.write(`[provider] ${provider} / ${model}\n`)
-process.stderr.write(`[tools] ${listTools().map((t) => t.name).join(', ')}\n`)
 
 // render() 接管终端（raw mode），返回 waitUntilExit() Promise
 const { waitUntilExit } = render(<App />)

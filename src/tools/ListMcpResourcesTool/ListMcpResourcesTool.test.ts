@@ -61,5 +61,5 @@ describe('ListMcpResourcesTool — 资源列表', () => {
 
 describe('ListMcpResourcesTool — 元数据', () => {
   test('工具名称正确', () => { expect(ListMcpResourcesTool.name).toBe('ListMcpResources') })
-  test('isReadOnly 为 true', () => { expect(ListMcpResourcesTool.isReadOnly).toBe(true) })
+  test('isReadOnly 为 true', () => { expect(ListMcpResourcesTool.isReadOnly({})).toBe(true) })
 })

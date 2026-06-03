@@ -20,7 +20,7 @@ interface ProviderOption {
 const PROVIDERS: ProviderOption[] = [
   { label: 'Anthropic', value: 'anthropic', hint: 'claude-opus / sonnet / haiku' },
   { label: 'DeepSeek', value: 'deepseek', hint: 'V4 chat · R1 reasoning' },
-  { label: 'OpenAI (GPT)', value: 'openai', hint: 'gpt-4o · o3' },
+  { label: 'OpenAI (GPT)', value: 'openai', hint: 'gpt-5.5 · gpt-5.4 · o3' },
 ]
 
 interface ModelOption { label: string; value: string; hint: string }
@@ -36,10 +36,11 @@ const MODELS: Record<Exclude<Provider, 'ollama'>, ModelOption[]> = {
     { label: 'deepseek-reasoner', value: 'deepseek-reasoner', hint: 'R1 推理' },
   ],
   openai: [
-    { label: 'gpt-4.1', value: 'gpt-4.1', hint: '最新' },
-    { label: 'gpt-4o', value: 'gpt-4o', hint: '均衡' },
-    { label: 'gpt-4o-mini', value: 'gpt-4o-mini', hint: '快速' },
-    { label: 'o3', value: 'o3', hint: '推理' },
+    { label: 'gpt-5.5', value: 'gpt-5.5', hint: '最强 · 128K 输出' },
+    { label: 'gpt-5.4', value: 'gpt-5.4', hint: '推荐 · 性价比' },
+    { label: 'gpt-5.4-mini', value: 'gpt-5.4-mini', hint: '快速 · 子任务' },
+    { label: 'gpt-4o', value: 'gpt-4o', hint: '旧 · 均衡' },
+    { label: 'o3', value: 'o3', hint: '旧 · 推理' },
   ],
 }
 

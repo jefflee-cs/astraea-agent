@@ -1,9 +1,10 @@
 // TaskListTool — 列出所有任务的概览（俯瞰视角）
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { getState } from '../../services/agent-state.js'
 
-export const TaskListTool: Tool = {
+export const TaskListTool = buildTool({
   name: 'TaskList',
   description: `List all tasks and agents — both running and completed.
 
@@ -13,7 +14,8 @@ Returns a summary of every task in the session. Use this to:
 - Find taskIds when you don't have them handy
 
 For full details on a specific task, use TaskGet.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -60,4 +62,4 @@ For full details on a specific task, use TaskGet.`,
 
     return { output: JSON.stringify(rows, null, 2) }
   },
-}
+})

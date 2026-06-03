@@ -25,6 +25,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     interactive: true,
   },
   {
+    name: '/goal',
+    summary: 'set a completion condition to work toward',
+    options: ['<condition>', 'clear'],
+  },
+  {
     name: '/wechat',
     summary: 'summarize WeChat chats now',
     options: [],
@@ -37,6 +42,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: '/login',
     summary: 'set API key and provider',
+    options: [],
+  },
+  {
+    name: '/model',
+    summary: 'show current provider and model',
     options: [],
   },
   {

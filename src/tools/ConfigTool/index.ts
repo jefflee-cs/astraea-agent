@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { globalSettingsPath } from '../../settings.js'
 
@@ -40,7 +41,7 @@ function setByPath(obj: Record<string, unknown>, path: string, value: unknown): 
   return result
 }
 
-export const ConfigTool: Tool = {
+export const ConfigTool = buildTool({
   name: 'Config',
   description: `Read or write Astraea settings in ~/.astraea/settings.json.
 
@@ -48,7 +49,7 @@ Read:  { key: "wechat.days" }                     → returns current value
 Write: { key: "wechat.days", value: 14 }          → updates and returns before/after
 
 Key supports dot-path notation for nested fields (e.g. "wechat.scope", "model").`,
-  isReadOnly: false,
+  isReadOnly: (input) => !('value' in input),
   inputSchema: {
     type: 'object',
     properties: {
@@ -61,10 +62,6 @@ Key supports dot-path notation for nested fields (e.g. "wechat.scope", "model").
   async call(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolCallResult> {
     const key = String(input['key'] ?? '')
     const hasValue = 'value' in input
-
-    if (hasValue && ctx.mode === 'orbit') {
-      return { output: 'Config write is not allowed in orbit (read-only) mode.', isError: true }
-    }
 
     const settings = readSettings()
 
@@ -89,4 +86,4 @@ Key supports dot-path notation for nested fields (e.g. "wechat.scope", "model").
       ].join('\n'),
     }
   },
-}
+})

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 
 let _testDir: string | undefined
@@ -10,7 +11,6 @@ export function _setSkillsDirForTest(dir: string | undefined) { _testDir = dir }
 function skillsDir(): string {
   return _testDir ?? join(resolve('.'), '.claude', 'skills')
 }
-
 function listSkillNames(): string[] {
   const dir = skillsDir()
   if (!existsSync(dir)) return []
@@ -18,15 +18,13 @@ function listSkillNames(): string[] {
     .filter(f => f.endsWith('.md'))
     .map(f => f.slice(0, -3))
 }
-
 function findSkillFile(name: string): string | undefined {
   const base = name.endsWith('.md') ? name.slice(0, -3) : name
   const dir = skillsDir()
   const path = join(dir, `${base}.md`)
   return existsSync(path) ? path : undefined
 }
-
-export const SkillTool: Tool = {
+export const SkillTool = buildTool({
   name: 'Skill',
   description: `Load and execute a skill from .claude/skills/.
 
@@ -34,7 +32,8 @@ Skills are Markdown files that contain instructions. When invoked, the skill's
 content is injected as the next prompt for the LLM to follow.
 
 Use skill names without the .md extension (e.g. "code-review", not "code-review.md").`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -65,4 +64,4 @@ Use skill names without the .md extension (e.g. "code-review", not "code-review.
 
     return { output }
   },
-}
+})

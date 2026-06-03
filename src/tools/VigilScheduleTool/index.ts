@@ -1,4 +1,5 @@
 // VigilScheduleTool — 周期性或定时任务（cron 表达式）
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { addTask, ensureDaemon, type VigilTask } from '../../utils/vigilTasks.js'
 import { calcNextFireAt } from '../../services/cron-scheduler.js'
@@ -6,7 +7,7 @@ import { ask } from '../AskUserQuestionTool/bridge.js'
 import { randomUUID } from 'node:crypto'
 import { promptNeedsWechat, checkWechatSetup } from '../../utils/wechatSetupGuard.js'
 
-export const VigilScheduleTool: Tool = {
+export const VigilScheduleTool = buildTool({
   name: 'VigilSchedule',
   description: `Schedule a RECURRING or fixed-time task using a cron expression.
 
@@ -27,7 +28,7 @@ Common cron patterns:
   "0 8,18 * * *"  — twice daily at 08:00 and 18:00
 
 Before calling this tool, always tell the user what you are about to schedule and let them confirm.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -118,4 +119,4 @@ Before calling this tool, always tell the user what you are about to schedule an
       ].join('\n'),
     }
   },
-}
+})

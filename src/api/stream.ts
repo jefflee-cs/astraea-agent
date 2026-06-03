@@ -11,7 +11,7 @@ export type { StreamOptions } from './anthropic'
 
 export async function* streamMessage(
   messages: Message[],
-  options: { system?: string; enablePromptCaching?: boolean; tools?: import('../tools/Tool').ToolSchema[] } = {},
+  options: { system?: string; enablePromptCaching?: boolean; tools?: import('../tools/Tool').ToolSchema[]; abortSignal?: AbortSignal } = {},
 ): AsyncGenerator<StreamEvent> {
   if (config.provider === 'deepseek') {
     yield* streamMessageDeepSeek(messages, options)

@@ -58,6 +58,24 @@ async function main() {
     process.exit(1)
   }
 
+  // ── /goal 非交互模式：设定完成条件并把它当作 directive 一路跑到达成 ──────────
+  // 用法: bun run src/cli.ts "/goal <condition>"
+  if (userInput === '/goal' || userInput.startsWith('/goal ')) {
+    const { setGoal, GOAL_CLEAR_ALIASES } = await import('./state/goalState.js')
+    const arg = userInput.slice('/goal'.length).trim()
+    if (!arg) {
+      console.error('Usage: /goal <completion condition>')
+      process.exit(1)
+    }
+    if ((GOAL_CLEAR_ALIASES as readonly string[]).includes(arg.toLowerCase())) {
+      console.error('[goal] nothing to clear in single-shot mode')
+      process.exit(0)
+    }
+    setGoal(arg)
+    console.error(`[goal] active — working until: ${arg}`)
+    userInput = arg  // condition 本身即 directive
+  }
+
   const tools = listTools()
   const enabledTools = new Set(tools.map(t => t.name))
   const modelId = provider === 'anthropic'
@@ -81,9 +99,12 @@ async function main() {
       case 'text':
         process.stdout.write(event.text)
         break
-      case 'tool_use':
-        console.error(`\n[tool_use] ${event.name}(${JSON.stringify(event.input)})`)
+      case 'tool_use': {
+        const t = tools.find(t => t.name === event.name)
+        const label = t ? (t.isReadOnly(event.input) ? 'Read' : 'Edit') : '?'
+        console.error(`\n[tool_use:${label}] ${event.name}(${JSON.stringify(event.input)})`)
         break
+      }
       case 'tool_result': {
         const status = event.isError ? 'error' : 'ok'
         const preview = event.output.slice(0, 120).replace(/\n/g, '↵')
@@ -97,6 +118,12 @@ async function main() {
         break
       case 'max_turns_reached':
         console.error(`\n[max_turns] reached ${event.maxTurns}`)
+        break
+      case 'goal_evaluated':
+        console.error(`\n[goal] ${event.met ? 'ACHIEVED' : 'continuing'} (turn ${event.turns}) — ${event.reason}`)
+        break
+      case 'goal_exhausted':
+        console.error(`\n[goal] stopped at safety cap ${event.maxTurns} turns — ${event.reason}`)
         break
     }
   }
@@ -114,8 +141,8 @@ async function runHeadlessTask(taskId: string, prompt: string, resultFile?: stri
 
   console.error(`[vigil:headless] task=${taskId}`)
 
-  // Derive write-tool set from registry — isReadOnly flag, no hardcoding
-  const writeToolNames = new Set(tools.filter(t => !t.isReadOnly).map(t => t.name))
+  // isReadOnly 现在是函数，用空 input 保守判断（无 input 时默认视为写操作）
+  const writeToolNames = new Set(tools.filter(t => !t.isReadOnly({})).map(t => t.name))
 
   const system = await getSystemPrompt({ modelId, enabledTools })
   const messages = [createUserMessage(prompt)]

@@ -1,11 +1,12 @@
 // VerifyOrbitExecutionTool — 执行完成后的自查工具（env 开关保护）
 // 仅在 ASTRAEA_VERIFY_ORBIT=true 时启用
 // 只读工具，强制模型在汇报结果前自我核查
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 
 const ENABLED = process.env.ASTRAEA_VERIFY_ORBIT === 'true'
 
-export const VerifyOrbitExecutionTool: Tool = {
+export const VerifyOrbitExecutionTool = buildTool({
   name: 'VerifyOrbitExecution',
   description: `Self-verification tool: call this BEFORE reporting a task as complete.
 
@@ -17,7 +18,8 @@ Checks:
 Returns a verification report. Only report the task as complete after this tool confirms all steps.
 
 This tool is only active when ASTRAEA_VERIFY_ORBIT=true.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -103,4 +105,4 @@ This tool is only active when ASTRAEA_VERIFY_ORBIT=true.`,
       isError: verdict === 'FAIL',
     }
   },
-}
+})

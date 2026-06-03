@@ -56,5 +56,5 @@ describe('SkillTool — 执行技能', () => {
 
 describe('SkillTool — 元数据', () => {
   test('工具名称正确', () => { expect(SkillTool.name).toBe('Skill') })
-  test('isReadOnly 为 true', () => { expect(SkillTool.isReadOnly).toBe(true) })
+  test('isReadOnly 为 true', () => { expect(SkillTool.isReadOnly({})).toBe(true) })
 })

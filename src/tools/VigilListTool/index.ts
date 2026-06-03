@@ -1,11 +1,13 @@
 // VigilListTool — 列出所有定时任务
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { readTasks } from '../../utils/vigilTasks.js'
 
-export const VigilListTool: Tool = {
+export const VigilListTool = buildTool({
   name: 'VigilList',
   description: `List all scheduled vigil tasks with their next fire times and IDs.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {},
@@ -44,4 +46,4 @@ export const VigilListTool: Tool = {
       ...tasks.map(t => `  • ${t.description} — next: ${new Date(t.nextFireAt).toLocaleString()}`),
     ]
   },
-}
+})

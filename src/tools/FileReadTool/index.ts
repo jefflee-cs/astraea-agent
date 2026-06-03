@@ -1,13 +1,15 @@
 // 文件读取工具 — 只读，支持行范围
 // 参考源码: claude-code-main/packages/builtin-tools/src/tools/FileReadTool/
+import { buildTool } from '../Tool'
 import type { Tool, ToolCallResult } from '../Tool'
 import { recordRead } from '../readFileState'
 
-export const FileReadTool: Tool = {
+export const FileReadTool = buildTool({
   name: 'Read',
   description:
     'Read the contents of a file. Optionally specify line offset and limit to read a specific range.',
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -65,4 +67,4 @@ export const FileReadTool: Tool = {
     const lineCount = output.split('\n').length
     return [`Read ${lineCount} lines ← ${filePath}`]
   },
-}
+})

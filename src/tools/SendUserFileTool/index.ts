@@ -1,19 +1,20 @@
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute } from 'node:path'
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} bytes`
   return `${(bytes / 1024).toFixed(1)} KB`
 }
-
-export const SendUserFileTool: Tool = {
+export const SendUserFileTool = buildTool({
   name: 'SendUserFile',
   description: `Deliver a local file to the user by displaying its path and metadata.
 Use after generating a report or summary file so the user can easily locate it.
 
 file_path must be an absolute path to an existing readable file.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -49,4 +50,4 @@ file_path must be an absolute path to an existing readable file.`,
 
     return { output: lines.join('\n') }
   },
-}
+})

@@ -4,6 +4,7 @@
 // 二次 AI 处理（对齐 best-practices applyPromptToMarkdown）：
 //   当调用方传入 prompt 时，用小模型从原始 Markdown 中提炼聚焦内容；
 //   未传 prompt 时，直接返回截断后的原始 Markdown（供模型自己阅读）。
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import TurndownService from 'turndown'
 import { querySmallModel } from '../../api/query-model.js'
@@ -17,7 +18,6 @@ let _turndown: TurndownService | null = null
 function getTurndown(): TurndownService {
   return (_turndown ??= new TurndownService({ headingStyle: 'atx', bulletListMarker: '-' }))
 }
-
 // ─── URL 安全校验 ────────────────────────────────────────────────────────────
 
 function validateUrl(raw: string): { ok: true; url: URL } | { ok: false; reason: string } {
@@ -38,13 +38,11 @@ function validateUrl(raw: string): { ok: true; url: URL } | { ok: false; reason:
   }
   return { ok: true, url }
 }
-
 // ─── HTML → Markdown ─────────────────────────────────────────────────────────
 
 function htmlToMarkdown(html: string): string {
   return getTurndown().turndown(html)
 }
-
 // ─── 二次 AI 提炼 Prompt（对齐 best-practices makeSecondaryModelPrompt）────────
 
 function makeProcessingPrompt(markdownContent: string, prompt: string): string {
@@ -63,10 +61,9 @@ ${prompt}
 
 请根据以上网页内容简洁地回答上述问题。只引用网页中实际存在的信息，不要补充训练数据中的内容。引用原文时加引号，保持在 125 字以内。`
 }
-
 // ─── 主工具 ──────────────────────────────────────────────────────────────────
 
-export const WebFetchTool: Tool = {
+export const WebFetchTool = buildTool({
   name: 'WebFetch',
   description: `Fetches a URL, converts HTML to Markdown, then uses a small AI model to extract the answer to your prompt from the page content.
 
@@ -74,7 +71,8 @@ Use after WebSearch to read the full content of specific articles or documentati
 When prompt is provided: returns a focused AI-processed summary of the page.
 When prompt is omitted: returns raw Markdown for you to read directly.
 IMPORTANT: Will fail for pages that require login or authentication.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -152,4 +150,4 @@ IMPORTANT: Will fail for pages that require login or authentication.`,
       clearTimeout(timer)
     }
   },
-}
+})

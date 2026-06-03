@@ -1,13 +1,14 @@
 // AgentTool — 子 Agent 启动器
 // Fire-and-Observe 模式：立即返回 taskId，子 Agent 在独立上下文中并行运行
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { generateAgentId, registerAgentTask } from '../../services/agent-state.js'
 import { runSubAgent } from '../../services/run-sub-agent.js'
 import { getSessionSystemPrompt } from '../../services/session-context.js'
 import { getWorkerTools } from '../registry.js'
 
-export const AgentTool: Tool = {
+export const AgentTool = buildTool({
   name: 'Agent',
   description: `Launch an independent sub-agent with its own context window and tool access.
 
@@ -19,7 +20,7 @@ Use to:
 Returns immediately with a taskId. The sub-agent runs in the background.
 When the sub-agent completes, a <task_notification> is injected into your next turn.
 Use TaskList / TaskGet to monitor running agents.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -57,4 +58,4 @@ Use TaskList / TaskGet to monitor running agents.`,
       }),
     }
   },
-}
+})

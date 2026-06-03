@@ -146,6 +146,21 @@ export function killAgentTask(agentId: string): boolean {
   return didKill
 }
 
+// 清空整个调度状态 —— 供 /clear 使用，让新会话从零开始。
+// 协作式取消所有仍在运行的子 Agent（abort 而非强杀），再丢弃整张任务字典。
+// 返回被中止的运行中 agent 数量，便于 REPL 给用户回执。
+export function clearAllTasks(): number {
+  let aborted = 0
+  for (const task of Object.values(_state.tasks)) {
+    if (task.kind === 'agent' && task.status === 'running') {
+      task.abortController.abort()
+      aborted++
+    }
+  }
+  _state = { tasks: {} }
+  return aborted
+}
+
 export function drainPendingMessages(agentId: string): string[] {
   let messages: string[] = []
   setState(prev => {

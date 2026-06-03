@@ -8,11 +8,13 @@
 //   4. 多处匹配保护：replace_all=false 时唯一匹配才允许替换
 import { resolve, dirname } from 'node:path'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { buildTool } from '../Tool'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool'
 import { validateWrite, recordWrite } from '../readFileState'
+import { checkWritePermission } from '../fileWriteGate'
 import { findActualString, preserveQuoteStyle, applyEdit, formatDiff } from './utils'
 
-export const FileEditTool: Tool = {
+export const FileEditTool = buildTool({
   name: 'Edit',
   description: `Perform exact string-replacement edits on a file. More efficient than rewriting the whole file.
 
@@ -32,7 +34,7 @@ Common patterns:
   Delete a line     → old_string=line+next line, new_string=next line only
   Create new file   → old_string="", new_string=full file content`,
 
-  isReadOnly: false,
+  isReadOnly: () => false,
 
   inputSchema: {
     type: 'object',
@@ -59,13 +61,6 @@ Common patterns:
   },
 
   async call(input, ctx: ToolContext): Promise<ToolCallResult> {
-    if (ctx.mode === 'orbit') {
-      return {
-        output: '[orbit mode] File edit blocked. Use ExitOrbitMode to present your plan and request approval first.',
-        isError: true,
-      }
-    }
-
     const filePath = input['file_path'] as string
     const oldString = input['old_string'] as string
     const newString = input['new_string'] as string
@@ -79,6 +74,12 @@ Common patterns:
         output: 'old_string and new_string are identical — no edit needed.',
         isError: true,
       }
+    }
+
+    // ── 权限闸：模式取向 + 红线 + 交互/fail-closed（§1.3 / §5 / §3.0）──────
+    const gate = await checkWritePermission(absolutePath, ctx, 'edit')
+    if (!gate.proceed) {
+      return { output: gate.rejection!, isError: true }
     }
 
     const fileExists = existsSync(absolutePath)
@@ -179,4 +180,4 @@ Common patterns:
     const header = `Updated → ${filePath}  (+${added} / -${removed})`
     return [header, ...diffLines.map(l => `  ${l}`)]
   },
-}
+})

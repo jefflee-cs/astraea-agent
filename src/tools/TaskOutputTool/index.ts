@@ -1,9 +1,10 @@
 // TaskOutputTool — 读取子 Agent 的实时输出流（增量 offset 游标）
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { getState } from '../../services/agent-state.js'
 
-export const TaskOutputTool: Tool = {
+export const TaskOutputTool = buildTool({
   name: 'TaskOutput',
   description: `Read the output buffer of a running or completed sub-agent.
 
@@ -19,7 +20,8 @@ Use to:
 - Monitor a background agent's progress in real time
 - Detect errors early and decide whether to call TaskStop
 - Read the full output of a completed agent`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -65,4 +67,4 @@ Use to:
       }),
     }
   },
-}
+})

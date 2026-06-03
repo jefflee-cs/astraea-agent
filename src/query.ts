@@ -16,6 +16,7 @@ import {
 import type { Tool, ToolSchema, ToolContext } from './tools/Tool'
 import { findTool } from './tools/registry'
 import { getMode } from './state/sessionMode'
+import { ask } from './tools/AskUserQuestionTool/bridge'
 import { yieldMissingToolResultBlocks } from './utils/messages'
 import {
   getSystemContext,
@@ -32,6 +33,14 @@ import {
 
 import { drainNotifications, hasPendingNotifications } from './services/notification-queue'
 import { hasRunningAgents } from './services/agent-state'
+import {
+  getActiveGoal,
+  recordGoalEvaluation,
+  markGoalAchieved,
+  clearGoal,
+  GOAL_MAX_TURNS,
+} from './state/goalState'
+import { evaluateGoal, serializeTranscript } from './services/goal-evaluator'
 
 // ─────────────────────────── 事件类型 ───────────────────────────────────────
 
@@ -43,6 +52,10 @@ export type QueryEvent =
   | { type: 'tool_result'; id: string; name: string; input: Record<string, unknown>; output: string; isError: boolean }
   | { type: 'max_turns_reached'; maxTurns: number }
   | { type: 'budget_stop'; reason: 'budget_reached' | 'diminishing_returns'; totalTokens: number }
+  // /goal Stop-hook：每个 turn 结束后 evaluator 的裁决
+  | { type: 'goal_evaluated'; met: boolean; reason: string; condition: string; turns: number }
+  // /goal 达到安全上限被强制停止
+  | { type: 'goal_exhausted'; reason: string; condition: string; maxTurns: number }
   | { type: 'done'; messages: (UserMessage | AssistantMessage)[] }
 
 // ─────────────────────────── 参数类型 ───────────────────────────────────────
@@ -54,6 +67,8 @@ export interface QueryOptions {
   cwd?: string               // 用于 session preamble 的工作目录（默认 process.cwd()）
   tokenBudget?: number | null  // 输出 token 预算上限（null = 无限制）
   agentId?: string             // 用于调试追踪哪个 agent 触发了停止
+  abortSignal?: AbortSignal    // ESC 取消信号
+  isInteractive?: boolean      // 是否有交互式用户在场（默认 true）。false → 工具遇 ask fail-closed deny
 }
 
 // ─────────────────────────── 主函数 ─────────────────────────────────────────
@@ -64,6 +79,9 @@ export async function* query(
   options: QueryOptions = {},
 ): AsyncGenerator<QueryEvent> {
   const maxTurns = options.maxTurns ?? 10
+  // 当 /goal 激活时，正常的 maxTurns 会过早截断目标循环。目标循环改用更高的
+  // GOAL_MAX_TURNS 作为硬上限（condition 自带的 turn/time 子句由 evaluator 判定）。
+  const turnCap = () => (getActiveGoal() ? Math.max(maxTurns, GOAL_MAX_TURNS) : maxTurns)
   const cwd = options.cwd ?? process.cwd()
   const budget = options.tokenBudget ?? null
   const agentId = options.agentId ?? 'default'
@@ -96,6 +114,14 @@ export async function* query(
   )
   let turnCount = 1
 
+  // counsel 模式两段式闸（Permission & Safety Technical Spec §7）：
+  //   ① counselConsulted    — 是否已通过 AskUserQuestion 向用户确认过方向
+  //   ② counselStartConfirmed — 方向确认后，用户是否已回答"现在开始执行"
+  // 两者皆 true 前，框架层拦截所有「非只读」工具（与 orbit 的硬闸对称）。
+  // 随 query() 调用作用域存活 → 每个用户请求都需重新确认。
+  let counselConsulted = false
+  let counselStartConfirmed = false
+
   while (true) {
     yield { type: 'turn_start', turn: turnCount }
 
@@ -103,6 +129,9 @@ export async function* query(
     const contentBlocks: (TextBlock | ToolUseBlock)[] = []
     const toolUseBlocks: ToolUseBlock[] = []
     let turnOutputTokens = 0
+    // 截断追踪：撞输出上限时模型停止原因 = 'max_tokens'；被截断在工具调用中途的 id 进 set
+    let stopReason: import('./types/message').StopReason | undefined
+    const incompleteToolIds = new Set<string>()
 
     // assistantMessage 在流结束前先设为 null，用于错误恢复
     let assistantMessage: AssistantMessage | null = null
@@ -112,6 +141,7 @@ export async function* query(
         system,
         enablePromptCaching: options.enablePromptCaching,
         tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+        abortSignal: options.abortSignal,
       })) {
         // 透传给上层（CLI 渲染）
         yield event
@@ -134,11 +164,19 @@ export async function* query(
           }
           contentBlocks.push(block)
           toolUseBlocks.push(block)
+          if (event.incomplete) incompleteToolIds.add(event.id)
         } else if (event.type === 'message_stop') {
           turnOutputTokens = event.usage.output_tokens
+          stopReason = event.stopReason
         }
       }
     } catch (err: unknown) {
+      // ESC 中止：保存部分消息后干净退出，不抛给调用方
+      if (err instanceof Error && err.name === 'AbortError') {
+        const partial: AssistantMessage = { role: 'assistant', content: contentBlocks }
+        yield { type: 'done', messages: contentBlocks.length > 0 ? [...messages, partial] : messages }
+        return
+      }
       // API 调用出错：如果已经收到了带 tool_use 的 assistant 消息，
       // 需要补齐 tool_result，否则下次 API 调用会因不配对而报 400
       if (toolUseBlocks.length > 0) {
@@ -172,6 +210,18 @@ export async function* query(
 
     // ── 3. 无工具调用 → 检查是否有后台 Agent 仍在运行 ─────────────────────
     if (toolUseBlocks.length === 0) {
+      // 纯文本输出撞了 max_tokens 被截断 → 注入续写指令，让模型从断点接着写，
+      // 而不是把半截内容当成最终答复交还用户。turnCap 仍是硬上限，不会无限续。
+      if (stopReason === 'max_tokens' && turnCount < turnCap()) {
+        const continueMsg: UserMessage = {
+          role: 'user',
+          content: [{ type: 'text', text: buildContinuationDirective() }],
+        }
+        messages = [...messages, assistantMessage, continueMsg]
+        turnCount++
+        continue
+      }
+
       const immediateNotifs = drainNotifications()
 
       if (immediateNotifs.length > 0) {
@@ -181,8 +231,8 @@ export async function* query(
           content: immediateNotifs.map(n => ({ type: 'text' as const, text: n })),
         }
         messages = [...messages, assistantMessage, waitMsg]
-        if (turnCount >= maxTurns) {
-          yield { type: 'max_turns_reached', maxTurns }
+        if (turnCount >= turnCap()) {
+          yield { type: 'max_turns_reached', maxTurns: turnCap() }
           yield { type: 'done' as const, messages }
           return
         }
@@ -193,8 +243,12 @@ export async function* query(
       if (hasRunningAgents()) {
         // Agents still running but no notifications yet — poll without calling model
         // This avoids burning tokens while idle-waiting
-        while (hasRunningAgents() && !hasPendingNotifications()) {
+        while (hasRunningAgents() && !hasPendingNotifications() && !options.abortSignal?.aborted) {
           await Bun.sleep(200)
+        }
+        if (options.abortSignal?.aborted) {
+          yield { type: 'done', messages: [...messages, assistantMessage] }
+          return
         }
         // Re-enter the loop: notifications are now available (or agents finished)
         const freshNotifs = drainNotifications()
@@ -204,11 +258,60 @@ export async function* query(
             content: freshNotifs.map(n => ({ type: 'text' as const, text: n })),
           }
           messages = [...messages, assistantMessage, waitMsg]
-          if (turnCount >= maxTurns) {
-            yield { type: 'max_turns_reached', maxTurns }
+          if (turnCount >= turnCap()) {
+            yield { type: 'max_turns_reached', maxTurns: turnCap() }
             yield { type: 'done' as const, messages }
             return
           }
+          turnCount++
+          continue
+        }
+      }
+
+      // ── /goal Stop-hook ──────────────────────────────────────────────────
+      // 真正的停止点：无工具调用、无待处理通知、无运行中 agent。若有激活的目标，
+      // 在交还控制权前先让 evaluator 裁决；未达成则注入"继续"指令并再跑一轮。
+      const goal = getActiveGoal()
+      if (goal) {
+        const transcript = serializeTranscript([...messages, assistantMessage])
+        let decision: { met: boolean; reason: string }
+        try {
+          decision = await evaluateGoal(goal.condition, transcript)
+        } catch (err: unknown) {
+          // evaluator 出错不应让目标崩溃：保守判未达成并继续
+          decision = { met: false, reason: `evaluator error: ${String(err)} — continuing` }
+        }
+        recordGoalEvaluation(decision.reason, tracker.lastGlobalTurnTokens)
+        const updated = getActiveGoal()
+        const turnsSoFar = updated?.turnsEvaluated ?? goal.turnsEvaluated + 1
+
+        yield {
+          type: 'goal_evaluated',
+          met: decision.met,
+          reason: decision.reason,
+          condition: goal.condition,
+          turns: turnsSoFar,
+        }
+
+        if (decision.met) {
+          // 达成 → 记录"已达成"并清除目标，正常交还控制权
+          markGoalAchieved(decision.reason)
+        } else if (turnsSoFar >= GOAL_MAX_TURNS) {
+          // 安全上限 → 强制停止，清除目标，提示用户
+          clearGoal()
+          yield {
+            type: 'goal_exhausted',
+            reason: decision.reason,
+            condition: goal.condition,
+            maxTurns: GOAL_MAX_TURNS,
+          }
+        } else {
+          // 未达成 → 注入继续指令，再跑一轮（不交还控制权）
+          const directive: UserMessage = {
+            role: 'user',
+            content: [{ type: 'text', text: buildGoalDirective(goal.condition, decision.reason) }],
+          }
+          messages = [...messages, assistantMessage, directive]
           turnCount++
           continue
         }
@@ -226,36 +329,120 @@ export async function* query(
     const toolCtx: ToolContext = {
       mode: getMode(),
       agentId: options.agentId,
-      abortSignal: undefined,
+      abortSignal: options.abortSignal,
+      isInteractive: options.isInteractive ?? true, // query() 是交互式 REPL 引擎，默认 true
     }
 
     // 分流式 vs 普通工具
     const streamingBlocks = toolUseBlocks.filter(b => !!findTool(b.name)?.callStream)
     const normalBlocks    = toolUseBlocks.filter(b => !findTool(b.name)?.callStream)
 
-    // 普通工具并行执行（无进度事件）
-    const normalResults = await Promise.all(
-      normalBlocks.map(async (toolUse) => {
+    // 普通工具按 isConcurrencySafe 分批：连续安全批并发，其余串行
+    type NormalResult = { toolUse: typeof normalBlocks[0]; output: string; isError: boolean }
+    const normalResults: NormalResult[] = []
+
+    // 将 normalBlocks 切分为批次：相邻全为并发安全的合并一批，否则独立一批
+    const batches: (typeof normalBlocks)[] = []
+    for (const toolUse of normalBlocks) {
+      const tool = findTool(toolUse.name)
+      const safe = tool ? tool.isConcurrencySafe(toolUse.input) : false
+      const lastBatch = batches[batches.length - 1]
+      const lastSafe  = lastBatch
+        ? findTool(lastBatch[0]!.name)?.isConcurrencySafe(lastBatch[0]!.input) ?? false
+        : false
+      if (safe && lastSafe && lastBatch) {
+        lastBatch.push(toolUse)
+      } else {
+        batches.push([toolUse])
+      }
+    }
+
+    for (const batch of batches) {
+      const batchSafe = findTool(batch[0]!.name)?.isConcurrencySafe(batch[0]!.input) ?? false
+      const runOne = async (toolUse: typeof batch[0]): Promise<NormalResult> => {
+        // 被输出上限截断在中途的工具调用：入参残缺，执行 = 写空文件/错误状态。直接拒绝并提示分块重试。
+        if (incompleteToolIds.has(toolUse.id)) {
+          return { toolUse, output: truncatedToolError(toolUse.name), isError: true }
+        }
         const tool = findTool(toolUse.name)
         if (!tool) return { toolUse, output: `Tool not found: "${toolUse.name}"`, isError: true }
-        // EnterOrbitMode / ExitOrbitMode 改变模式后，后续工具拿到更新后的 mode
         const ctx: ToolContext = { ...toolCtx, mode: getMode() }
+        // 框架层 orbit 拦截：isReadOnly(input) 动态判断，false → 拦截写操作
+        if (ctx.mode === 'orbit' && !tool.isReadOnly(toolUse.input)) {
+          return {
+            toolUse,
+            output: `[orbit mode] ${tool.name} blocked — write operation not allowed. Use ExitOrbitMode to present your plan first.`,
+            isError: true,
+          }
+        }
+        // 框架层 counsel 拦截：方向确认 + 开工确认 两道闸都过之前，禁止任何写/执行类工具。
+        // 只读工具（Read/Glob/Grep…）放行，供模型先扫描项目；逃生口是调用 AskUserQuestion。
+        if (ctx.mode === 'counsel' && !tool.isReadOnly(toolUse.input) && !(counselConsulted && counselStartConfirmed)) {
+          return {
+            toolUse,
+            output: `[counsel mode] ${tool.name} blocked — confirm the direction with the user first. Call AskUserQuestion to ask strategic multiple-choice question(s) about scope / approach / trade-offs, then proceed once the user has answered.`,
+            isError: true,
+          }
+        }
         try {
           const result = await tool.call(toolUse.input, ctx)
+          // 用户已完成方向确认 → 紧接着问"是否现在开始执行"（counsel 第二道闸）
+          if (tool.name === 'AskUserQuestion' && !result.isError) {
+            counselConsulted = true
+            if (ctx.mode === 'counsel' && !counselStartConfirmed) {
+              const go = await ask(
+                'Direction confirmed. Start executing now? / 方向已确认，现在开始执行吗？',
+                ['yes — start executing now', 'no — keep discussing'],
+              )
+              const ans = go.trim().toLowerCase()
+              // 空答复（无 UI 监听）视为放行，避免死锁；'no…' 保持闸闭
+              counselStartConfirmed = ans === '' || ans.startsWith('y') || ans.startsWith('1')
+            }
+          }
           return { toolUse, output: result.output, isError: result.isError ?? false }
         } catch (err: unknown) {
           return { toolUse, output: `Tool execution error: ${String(err)}`, isError: true }
         }
-      }),
-    )
+      }
+
+      if (batchSafe) {
+        normalResults.push(...await Promise.all(batch.map(runOne)))
+      } else {
+        for (const toolUse of batch) {
+          normalResults.push(await runOne(toolUse))
+        }
+      }
+    }
 
     // 流式工具顺序执行，每个 chunk 都 yield tool_progress
     const streamingResults: Array<{ toolUse: typeof toolUseBlocks[0]; output: string; isError: boolean }> = []
     for (const toolUse of streamingBlocks) {
+      if (incompleteToolIds.has(toolUse.id)) {
+        streamingResults.push({ toolUse, output: truncatedToolError(toolUse.name), isError: true })
+        continue
+      }
       const tool = findTool(toolUse.name)!
       const ctx: ToolContext = { ...toolCtx, mode: getMode() }
       let output: string
       let isError: boolean
+      // 框架层 orbit 拦截（流式工具同样适用）
+      if (ctx.mode === 'orbit' && !tool.isReadOnly(toolUse.input)) {
+        streamingResults.push({
+          toolUse,
+          output: `[orbit mode] ${tool.name} blocked — write operation not allowed. Use ExitOrbitMode to present your plan first.`,
+          isError: true,
+        })
+        continue
+      }
+      // 框架层 counsel 拦截（流式工具同样适用）：两道闸都过之前禁止写/执行
+      if (ctx.mode === 'counsel' && !tool.isReadOnly(toolUse.input) && !(counselConsulted && counselStartConfirmed)) {
+        streamingResults.push({
+          toolUse,
+          output: `[counsel mode] ${tool.name} blocked — confirm the direction with the user via AskUserQuestion first, then proceed once answered.`,
+          isError: true,
+        })
+        continue
+      }
       try {
         const gen = tool.callStream!(toolUse.input, ctx)
         let next: IteratorResult<string, import('./tools/Tool.js').ToolCallResult>
@@ -293,6 +480,18 @@ export async function* query(
     const pendingNotifs = drainNotifications()
     const extraTextBlocks: TextBlock[] = pendingNotifs.map(n => ({ type: 'text', text: n }))
 
+    // counsel 强制注入：本轮出现了因未问用户而被拦截的写/执行操作
+    // → 在下一轮的 user message 里追加强制指令，模型没有退路，必须先调 AskUserQuestion
+    const counselWasBlocked = !(counselConsulted && counselStartConfirmed) && allResults.some(
+      r => r.isError && r.output.startsWith('[counsel mode]'),
+    )
+    if (counselWasBlocked) {
+      extraTextBlocks.push({
+        type: 'text',
+        text: '[Counsel mode enforcement] You attempted a write/execute action without first consulting the user. MANDATORY: your very next action must be to call AskUserQuestion with an options[] array. Ask about scope, format, style, or priorities — whatever is strategically relevant for this task. Do NOT produce any text summary or proceed with any non-read-only tool until you have called AskUserQuestion and the user has answered.',
+      })
+    }
+
     // ── 5. 把 assistant + tool_results 追加到历史，进入下一轮 ──────────────
     const toolResultMessage: UserMessage = {
       role: 'user',
@@ -301,13 +500,62 @@ export async function* query(
 
     messages = [...messages, assistantMessage, toolResultMessage]
 
+    // ESC 中止（工具执行阶段）：完整保存本轮结果后停止
+    if (options.abortSignal?.aborted) {
+      yield { type: 'done', messages }
+      return
+    }
+
     // ── 6. maxTurns 保护 ───────────────────────────────────────────────────
-    if (turnCount >= maxTurns) {
-      yield { type: 'max_turns_reached', maxTurns }
+    if (turnCount >= turnCap()) {
+      yield { type: 'max_turns_reached', maxTurns: turnCap() }
       yield { type: 'done' as const, messages }
       return
     }
 
     turnCount++
   }
+}
+
+// ─────────────────────────── /goal 继续指令 ─────────────────────────────────
+// 目标未达成时注入给模型的下一轮指令：把 condition 重申为指令，并带上
+// evaluator 的理由作为针对性指引（对齐文档"includes the reason as guidance"）。
+function buildGoalDirective(condition: string, reason: string): string {
+  return [
+    '[/goal] Your active goal is NOT yet satisfied — keep working, do not return control to the user.',
+    '',
+    'Goal condition:',
+    condition,
+    '',
+    "Evaluator feedback (why it's not met yet):",
+    reason,
+    '',
+    'Take the next concrete action toward the condition. Prove progress through your output ' +
+      '(run the command, show the result, count the files). Do not ask for confirmation or stop ' +
+      'until the condition is demonstrably met in the transcript. If you believe it is already met, ' +
+      'state explicitly which evidence in your output proves it.',
+  ].join('\n')
+}
+
+// ─────────────────────────── 截断恢复指令 ───────────────────────────────────
+// 纯文本输出撞 max_tokens 被截断时注入：让模型从断点无缝续写。
+function buildContinuationDirective(): string {
+  return [
+    '[system] Your previous message was cut off because it hit the output token limit — it is incomplete.',
+    'Continue from exactly where you stopped. Do not repeat what you already wrote, do not restart, ' +
+      'and do not apologize — just resume the next character as if there was no interruption.',
+  ].join('\n')
+}
+
+// 工具调用被截断在中途时回传给模型的 tool_result。入参 JSON 残缺，工具未执行。
+function truncatedToolError(toolName: string): string {
+  return [
+    `[truncated] The "${toolName}" call was cut off at the output token limit before its arguments finished streaming.`,
+    'NOTHING was executed and NO file was written — the arguments were incomplete.',
+    'Recover by splitting the work so each tool call fits the budget:',
+    `  • For a large file: call Write with only the FIRST portion, then append the remaining parts with`,
+    `    successive Edit calls (or Bash append). Never try to emit the whole large file in one Write again.`,
+    '  • Prefer self-contained, compact output (inline SVG/CSS over verbose markup) to stay within budget.',
+    'Do not retry the identical oversized call — it will be truncated again.',
+  ].join('\n')
 }

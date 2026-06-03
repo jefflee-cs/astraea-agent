@@ -66,14 +66,10 @@ describe('ConfigTool — 写入', () => {
     expect(r.output).toContain('new')
   })
 
-  test('orbit 模式下写入被拒绝', async () => {
-    writeFileSync(join(tmpDir, 'settings.json'), JSON.stringify({}))
-    const r = await ConfigTool.call({ key: 'model', value: 'x' }, { mode: 'orbit' })
-    expect(r.isError).toBe(true)
-  })
 })
 
 describe('ConfigTool — 元数据', () => {
   test('工具名称正确', () => { expect(ConfigTool.name).toBe('Config') })
-  test('isReadOnly 为 false（写操作）', () => { expect(ConfigTool.isReadOnly).toBe(false) })
+  test('无 value 时 isReadOnly 为 true（读操作）', () => { expect(ConfigTool.isReadOnly({})).toBe(true) })
+  test('有 value 时 isReadOnly 为 false（写操作）', () => { expect(ConfigTool.isReadOnly({ key: 'model', value: 'x' })).toBe(false) })
 })

@@ -1,10 +1,11 @@
 // ListPeersTool — 发现本机可通信的其他 Astraea 进程
 // 双层探活：OS 级（process.kill probe）+ 应用级（socket ping）
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { discoverPeers } from '../../services/uds-server.js'
 
-export const ListPeersTool: Tool = {
+export const ListPeersTool = buildTool({
   name: 'ListPeers',
   description: `Discover other Astraea instances running on this machine that you can communicate with.
 
@@ -16,7 +17,8 @@ Two-layer liveness check:
 2. App-level: ping the socket to confirm it's accepting connections
 
 Use this before SendMessage to get valid socket addresses.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {},
@@ -47,4 +49,4 @@ Use this before SendMessage to get valid socket addresses.`,
       ),
     }
   },
-}
+})

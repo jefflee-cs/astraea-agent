@@ -52,5 +52,5 @@ describe('ReadMcpResourceTool — 读取资源', () => {
 
 describe('ReadMcpResourceTool — 元数据', () => {
   test('工具名称正确', () => { expect(ReadMcpResourceTool.name).toBe('ReadMcpResource') })
-  test('isReadOnly 为 true', () => { expect(ReadMcpResourceTool.isReadOnly).toBe(true) })
+  test('isReadOnly 为 true', () => { expect(ReadMcpResourceTool.isReadOnly({})).toBe(true) })
 })

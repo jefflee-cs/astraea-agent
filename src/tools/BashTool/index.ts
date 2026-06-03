@@ -1,11 +1,14 @@
 // BashTool 主入口 — 文档 §六 完整架构
 // 调用顺序: 安全检查 → 只读放行 → 规则引擎 → 用户确认 → 执行
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { checkCommandSecurity } from './security/injection-check.js'
 import { isReadOnlyCommand } from './security/readonly-check.js'
 import { matchRule, DEFAULT_RULES, type PermissionRule } from './permissions/permission-rules.js'
 import { confirmWithUser } from './permissions/confirm.js'
 import { loadPermissionRules, appendPermissionRule } from '../../config/permissions.js'
+import { shellAskBehavior, type PermissionBehavior } from '../../state/sessionMode.js'
+import { commandTouchesSensitivePath } from '../../config/redlines.js'
 import { executeBash, executeStreamingBash } from './executor/shell.js'
 import { syncCwd } from './executor/cwd-tracker.js'
 import { spawnBackground, getTask } from './executor/background-task.js'
@@ -32,6 +35,72 @@ async function ensureConfigLoaded(): Promise<void> {
   }
 }
 
+interface ShellPermissionOutcome {
+  proceed: boolean
+  /** 当 proceed=false 时的拒绝说明。 */
+  rejection?: string
+}
+
+/**
+ * 解析一条（非只读）命令的 shell 权限（Permission & Safety Technical Spec §1.3 / §3.0 / §5）。
+ * 取向：deny 规则 → 拒绝；allow 规则 → 放行；ask 规则或未命中 → 按模式（forge=allow，其余=ask）。
+ * 红线：触碰敏感路径的命令即便 forge 也强制 ask。ask 在无人在场时 fail-closed deny，绝不阻塞。
+ */
+async function resolveShellPermission(
+  command: string,
+  description: string | undefined,
+  ctx: ToolContext,
+): Promise<ShellPermissionOutcome> {
+  // 规则优先级：运行时追加 > 配置文件 > 内置默认
+  const allRules = [...runtimeRules, ...configRules, ...DEFAULT_RULES]
+  const ruleAction = matchRule(command, allRules)
+
+  // deny 一票否决
+  if (ruleAction === 'deny') {
+    return { proceed: false, rejection: `Command denied by permission rules: \`${command}\`` }
+  }
+
+  // allow 规则 → 放行；ask 规则或未命中(null) → 按模式取向（forge=allow，其余=ask）
+  let behavior: PermissionBehavior = ruleAction === 'allow' ? 'allow' : shellAskBehavior(ctx.mode)
+
+  // 红线：非只读命令触碰敏感路径 → 即便 forge 也强制 ask
+  if (behavior === 'allow' && commandTouchesSensitivePath(command)) behavior = 'ask'
+
+  if (behavior === 'allow') return { proceed: true }
+
+  // behavior === 'ask'：无人在场则 fail-closed deny，绝不挂起
+  if (ctx.isInteractive !== true) {
+    return {
+      proceed: false,
+      rejection: `Command requires confirmation, but no interactive user is available (fail-closed deny): \`${command}\`. Pre-allow it in .astraea/settings.json, or run interactively.`,
+    }
+  }
+
+  const confirm = await confirmWithUser(command, description)
+
+  if (confirm.remember === 'always-deny') {
+    await appendPermissionRule(process.cwd(), command, 'deny')
+    configRules.unshift({ pattern: command, action: 'deny' })
+    return { proceed: false, rejection: `Command denied. Rule saved: deny "${command}"` }
+  }
+
+  if (!confirm.proceed) {
+    return { proceed: false, rejection: 'Command cancelled by user.' }
+  }
+
+  if (confirm.remember === 'always-allow') {
+    try {
+      await appendPermissionRule(process.cwd(), command, 'allow') // 默认写 local
+      configRules.unshift({ pattern: command, action: 'allow' })
+    } catch (err) {
+      // 红线命令不可持久化为 allow —— 本次放行，但不写规则（防自我提权）
+      process.stderr.write(`[BashTool] not persisting allow rule: ${String(err)}\n`)
+    }
+  }
+
+  return { proceed: true }
+}
+
 const TOOL_DESCRIPTION = `Executes a given bash command and returns its output.
 
 The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh).
@@ -55,10 +124,11 @@ IMPORTANT: Avoid using this tool to run \`cat\`, \`head\`, \`tail\`, \`sed\`, \`
 - Set \`run_in_background: true\` for long-running services or monitoring commands
 - Query a running task by passing \`background_task_id\` instead of \`command\``
 
-export const BashTool: Tool = {
+export const BashTool = buildTool({
   name: 'Bash',
   description: TOOL_DESCRIPTION,
-  isReadOnly: false,
+  isReadOnly: (input) => isReadOnlyCommand(String(input['command'] ?? '')),
+  isConcurrencySafe: (input) => isReadOnlyCommand(String(input['command'] ?? '')),
   inputSchema: {
     type: 'object',
     properties: {
@@ -131,53 +201,13 @@ export const BashTool: Tool = {
       return formatResult(await executeBash({ command, timeout }))
     }
 
-    // ── orbit 模式：非只读命令 → 拦截 ───────────────────────────────
-    if (ctx.mode === 'orbit') {
-      return {
-        output: `[orbit mode] Write command blocked: \`${command}\`. Use ExitOrbitMode to present your plan and request approval first.`,
-        isError: true,
-      }
-    }
-
     // ── 4. 加载配置文件规则（首次调用时） ───────────────────────────
     await ensureConfigLoaded()
 
-    // 规则优先级：运行时追加 > 配置文件 > 内置默认
-    const allRules = [...runtimeRules, ...configRules, ...DEFAULT_RULES]
-    const ruleAction = matchRule(command, allRules)
-
-    // ── 5. deny → 直接拒绝 ───────────────────────────────────────────
-    if (ruleAction === 'deny') {
-      return {
-        output: `Command denied by permission rules: \`${command}\``,
-        isError: true,
-      }
-    }
-
-    // ── 6. allow / forge → 跳过确认，直接执行 ───────────────────────
-    // （ruleAction === null 也跳过确认，保持宽松默认行为）
-
-    // ── 7. ask → 弹出终端确认框（forge 模式跳过）───────────────────
-    if (ruleAction === 'ask' && ctx.mode !== 'forge') {
-      const confirm = await confirmWithUser(command, description)
-
-      if (confirm.remember === 'always-deny') {
-        await appendPermissionRule(process.cwd(), command, 'deny')
-        configRules.unshift({ pattern: command, action: 'deny' })
-        return {
-          output: `Command denied. Rule saved: deny "${command}"`,
-          isError: true,
-        }
-      }
-
-      if (!confirm.proceed) {
-        return { output: 'Command cancelled by user.', isError: true }
-      }
-
-      if (confirm.remember === 'always-allow') {
-        await appendPermissionRule(process.cwd(), command, 'allow')
-        configRules.unshift({ pattern: command, action: 'allow' })
-      }
+    // ── 5-7. 权限解析：规则 + 模式取向 + 红线 + 交互/fail-closed ────────
+    const perm = await resolveShellPermission(command, description, ctx)
+    if (!perm.proceed) {
+      return { output: perm.rejection!, isError: true }
     }
 
     // ── 8. 可疑模式警告（safe:true 但有 reason）─────────────────────
@@ -217,24 +247,9 @@ export const BashTool: Tool = {
     if (!security.safe) return { output: `Security check blocked: ${security.reason}`, isError: true }
 
     if (!isReadOnlyCommand(command)) {
-      if (ctx.mode === 'orbit') {
-        return {
-          output: `[orbit mode] Write command blocked: \`${command}\`. Use ExitOrbitMode first.`,
-          isError: true,
-        }
-      }
       await ensureConfigLoaded()
-      const allRules = [...runtimeRules, ...configRules, ...DEFAULT_RULES]
-      const ruleAction = matchRule(command, allRules)
-      if (ruleAction === 'deny') return { output: `Command denied: \`${command}\``, isError: true }
-      if (ruleAction === 'ask' && ctx.mode !== 'forge') {
-        const confirm = await confirmWithUser(command, input['description'] as string | undefined)
-        if (!confirm.proceed) return { output: 'Command cancelled by user.', isError: true }
-        if (confirm.remember === 'always-allow') {
-          await appendPermissionRule(process.cwd(), command, 'allow')
-          configRules.unshift({ pattern: command, action: 'allow' })
-        }
-      }
+      const perm = await resolveShellPermission(command, input['description'] as string | undefined, ctx)
+      if (!perm.proceed) return { output: perm.rejection!, isError: true }
     }
 
     const gen = executeStreamingBash({ command, timeout: input['timeout'] as number | undefined })
@@ -247,7 +262,7 @@ export const BashTool: Tool = {
     await syncCwd()
     return formatResult(result.value)
   },
-}
+})
 
 function formatResult(result: Awaited<ReturnType<typeof executeBash>>): ToolCallResult {
   const parts: string[] = []

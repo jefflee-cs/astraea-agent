@@ -9,6 +9,7 @@
 import OpenAI from 'openai'
 import { config } from '../config'
 import { getClient } from './client'
+import { isReasoningModel } from './openai'
 
 const ANTHROPIC_SMALL_MODEL = 'claude-haiku-4-5-20251001'
 const OPENAI_SMALL_MODEL = 'gpt-4o-mini'
@@ -43,13 +44,16 @@ export async function querySmallModel(
       ? { baseURL: config.deepseek.baseUrl, apiKey: config.deepseek.apiKey, model: config.deepseek.model }
       : { baseURL: config.ollama.baseUrl, apiKey: 'ollama', model: config.ollama.model }
 
-  const openaiClient = new OpenAI({ baseURL: clientCfg.baseURL, apiKey: clientCfg.apiKey })
+  const openaiClient = new OpenAI({ baseURL: clientCfg.baseURL, apiKey: clientCfg.apiKey, maxRetries: 5 })
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = []
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt })
   messages.push({ role: 'user', content: userPrompt })
 
+  const tokenLimit = isReasoningModel(clientCfg.model)
+    ? { max_completion_tokens: 4096 }
+    : { max_tokens: 4096 }
   const resp = await openaiClient.chat.completions.create(
-    { model: clientCfg.model, max_tokens: 4096, messages },
+    { model: clientCfg.model, ...tokenLimit, messages },
     signal ? { signal } : undefined,
   )
   return resp.choices[0]?.message?.content ?? ''

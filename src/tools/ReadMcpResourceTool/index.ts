@@ -1,3 +1,4 @@
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 
 type FetchResult = { content: string; mimeType?: string } | { error: string }
@@ -13,18 +14,17 @@ export function _setMcpFetcherForTest(fn: McpFetcher | undefined) { _testFetcher
 export let fetchMcpResource: McpFetcher = async (_server, uri) => ({
   error: `No MCP client connected. Cannot fetch: ${uri}`,
 })
-
 function activeFetcher(): McpFetcher {
   return _testFetcher ?? fetchMcpResource
 }
-
-export const ReadMcpResourceTool: Tool = {
+export const ReadMcpResourceTool = buildTool({
   name: 'ReadMcpResource',
   description: `Read the content of a specific MCP resource by URI.
 
 Use ListMcpResources first to discover available URIs.
 Binary resources (images, PDFs) are returned as a file path reference.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -50,4 +50,4 @@ Binary resources (images, PDFs) are returned as a file path reference.`,
     const header = `[MCP Resource: ${uri}]\n\n`
     return { output: header + result.content }
   },
-}
+})

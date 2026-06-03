@@ -24,6 +24,7 @@
 import { resolve, extname } from 'node:path'
 import { readFileSync, statSync, existsSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { buildTool } from '../Tool'
 import type { Tool, ToolCallResult } from '../Tool'
 import { getLspManager } from './lsp-manager'
 import { formatLspResult } from './formatters'
@@ -56,13 +57,12 @@ const OPERATION_TO_METHOD: Record<LspOperation, string> = {
   incomingCalls: 'textDocument/prepareCallHierarchy',  // 第一步
   outgoingCalls: 'textDocument/prepareCallHierarchy',  // 第一步
 }
-
 // 需要 gitignore 后置过滤的操作（返回文件位置数组的操作）
 const OPERATIONS_NEED_FILTER: Set<LspOperation> = new Set([
   'goToDefinition', 'findReferences', 'goToImplementation',
 ])
 
-export const LSPTool: Tool = {
+export const LSPTool = buildTool({
   name: 'LSP',
   description: `Semantic code intelligence using Language Server Protocol.
 Understands code structure, types, and references — not just text patterns.
@@ -84,7 +84,8 @@ Requires ENABLE_LSP_TOOL=true and a supported language server installed.
 TypeScript/JavaScript: typescript-language-server (included)
 Python: pyright-langserver or pylsp | Go: gopls | Rust: rust-analyzer`,
 
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
 
   inputSchema: {
     type: 'object',
@@ -255,4 +256,4 @@ Python: pyright-langserver or pylsp | Go: gopls | Rust: rust-analyzer`,
       output: `[LSP ${operation}] ${filePath}:${line}:${character}\n\n${formatted}`,
     }
   },
-}
+})

@@ -1,3 +1,4 @@
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import type { ConnectedMCPServer } from '../../mcp/types.js'
 
@@ -7,11 +8,10 @@ let _testRegistry: ConnectedMCPServer[] | undefined
 export function _setMcpRegistryForTest(servers: ConnectedMCPServer[] | undefined) {
   _testRegistry = servers
 }
-
 /** Production hook: replace with real MCP connection registry when available. */
 export let getMcpServers: () => ConnectedMCPServer[] = () => _testRegistry ?? []
 
-export const ListMcpResourcesTool: Tool = {
+export const ListMcpResourcesTool = buildTool({
   name: 'ListMcpResources',
   description: `List resources exposed by connected MCP servers.
 
@@ -19,7 +19,8 @@ Resources are named data objects (files, docs, repo contents) that MCP servers
 expose separately from their tools. Use ReadMcpResource to fetch a specific URI.
 
 Optional: filter by server name to see only that server's resources.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -46,7 +47,7 @@ Optional: filter by server name to see only that server's resources.`,
     const sections = servers.map(formatServerResources)
     return { output: sections.join('\n\n') }
   },
-}
+})
 
 function formatServerResources(server: ConnectedMCPServer): string {
   const resources = server.resources ?? []

@@ -1,3 +1,4 @@
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { executePowerShell } from './executor/powershell.js'
 import { matchRule, DEFAULT_RULES, type PermissionRule } from '../BashTool/permissions/permission-rules.js'
@@ -21,13 +22,11 @@ function checkPsSecurity(command: string): { safe: boolean; reason?: string } {
   }
   return { safe: true }
 }
-
 const runtimeRules: PermissionRule[] = []
 
 export function addPsPermissionRule(rule: PermissionRule): void {
   runtimeRules.unshift(rule)
 }
-
 let configRules: PermissionRule[] = []
 let configLoaded = false
 
@@ -40,7 +39,6 @@ async function ensureConfigLoaded(): Promise<void> {
     configRules = []
   }
 }
-
 const TOOL_DESCRIPTION = `Executes a PowerShell (pwsh) command and returns its output.
 
 Requires PowerShell 7+ (pwsh) to be installed. On macOS/Linux install via: brew install --cask powershell
@@ -52,10 +50,10 @@ Requires PowerShell 7+ (pwsh) to be installed. On macOS/Linux install via: brew 
 - You may specify an optional timeout in milliseconds (up to 600000ms). Default: 120000ms
 - Working directory starts from the current session directory`
 
-export const PowerShellTool: Tool = {
+export const PowerShellTool = buildTool({
   name: 'PowerShell',
   description: TOOL_DESCRIPTION,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -128,4 +126,4 @@ export const PowerShellTool: Tool = {
       isError: result.exitCode !== 0,
     }
   },
-}
+})

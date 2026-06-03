@@ -54,5 +54,5 @@ describe('ReviewArtifactTool — 输出格式', () => {
 
 describe('ReviewArtifactTool — 元数据', () => {
   test('工具名称正确', () => { expect(ReviewArtifactTool.name).toBe('ReviewArtifact') })
-  test('isReadOnly 为 true', () => { expect(ReviewArtifactTool.isReadOnly).toBe(true) })
+  test('isReadOnly 为 true', () => { expect(ReviewArtifactTool.isReadOnly({})).toBe(true) })
 })

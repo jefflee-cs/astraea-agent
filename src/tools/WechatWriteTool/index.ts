@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { checkWechatSetup } from '../../utils/wechatSetupGuard.js'
 
@@ -23,8 +24,7 @@ async function runSend(args: Record<string, unknown>): Promise<Record<string, un
     return { error: `python3 exited ${exit}: ${stdout.slice(0, 200)}` }
   }
 }
-
-export const WechatWriteTool: Tool = {
+export const WechatWriteTool = buildTool({
   name: 'WechatWrite',
   description: `Send a WeChat message to a contact or group chat via macOS keyboard simulation.
 Does not require Accessibility API — navigates via Cmd+F search, pastes via clipboard.
@@ -33,7 +33,7 @@ Contact names MUST be the exact strings as they appear in WeChat, in the origina
 Do NOT transliterate Chinese names to English (use "李嘉俊", never "Li Jiajun").
 
 Requires: WeChat open on screen (macOS only). Same setup as WechatRead.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -69,4 +69,4 @@ Requires: WeChat open on screen (macOS only). Same setup as WechatRead.`,
       output: `已向「${contact}」发送消息（${result['message_length']} 字）。`,
     }
   },
-}
+})

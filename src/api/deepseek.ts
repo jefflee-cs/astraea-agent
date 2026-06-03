@@ -62,6 +62,8 @@ export async function* streamMessageDeepSeek(
   const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>()
   let inputTokens = 0
   let outputTokens = 0
+  let truncated = false   // finish_reason === 'length' → 撞输出上限被截断
+  let finishReason: string | null = null
 
   const openaiTools: OpenAI.Chat.ChatCompletionTool[] | undefined =
     options.tools?.map((t: ToolSchema) => ({
@@ -76,7 +78,7 @@ export async function* streamMessageDeepSeek(
     stream: true,
     stream_options: { include_usage: true },
     ...(openaiTools?.length ? { tools: openaiTools, tool_choice: 'auto' } : {}),
-  })
+  }, { signal: options.abortSignal })
 
   for await (const chunk of stream) {
     const choice = chunk.choices[0]
@@ -105,15 +107,26 @@ export async function* streamMessageDeepSeek(
       }
     }
 
-    if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop') {
+    if (choice.finish_reason && !finishReason) {
+      finishReason = choice.finish_reason
+      truncated = finishReason === 'length'
       for (const [, buf] of toolCallBuffers) {
         let input: Record<string, unknown> = {}
-        try { input = JSON.parse(buf.args) } catch { /* partial */ }
-        yield { type: 'tool_use', id: buf.id, name: buf.name, input }
+        let incomplete = false
+        try { input = JSON.parse(buf.args) } catch { incomplete = true }
+        yield { type: 'tool_use', id: buf.id, name: buf.name, input, incomplete: incomplete || truncated }
       }
       toolCallBuffers.clear()
-      yield { type: 'message_stop', usage: { input_tokens: inputTokens, output_tokens: outputTokens } }
-      return
+      // 不 return：usage 在 finish_reason 之后的「空 choices」chunk 里
     }
+  }
+
+  yield {
+    type: 'message_stop',
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    stopReason: truncated ? 'max_tokens'
+      : finishReason === 'tool_calls' ? 'tool_use'
+      : finishReason === 'stop' ? 'end_turn'
+      : 'other',
   }
 }

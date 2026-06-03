@@ -56,7 +56,7 @@ describe('WebFetchTool', () => {
   })
 
   test('isReadOnly 为 true', () => {
-    expect(WebFetchTool.isReadOnly).toBe(true)
+    expect(WebFetchTool.isReadOnly({})).toBe(true)
   })
 
   test('inputSchema 包含必填字段 url', () => {

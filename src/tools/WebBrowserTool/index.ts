@@ -3,6 +3,7 @@
 //
 // 设计原则：运行时不可用时返回说明性内容而非抛出异常，
 // 让 LLM 可以理解限制并引导用户使用 WebFetch 替代。
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 
 type BrowserAction = 'navigate' | 'screenshot' | 'click' | 'type' | 'scroll'
@@ -17,7 +18,6 @@ export interface BrowserDriver {
   type(selector: string, text: string): Promise<{ title: string; url: string; content: string }>
   scroll(): Promise<{ title: string; url: string; content: string }>
 }
-
 let _driver: BrowserDriver | null = null
 let _initAttempted = false
 
@@ -25,12 +25,10 @@ export function injectBrowserDriver(driver: BrowserDriver): void {
   _driver = driver
   _initAttempted = true
 }
-
 export function resetBrowserDriver(): void {
   _driver = null
   _initAttempted = false
 }
-
 async function lazyInit(): Promise<void> {
   if (_initAttempted) return
   _initAttempted = true
@@ -41,14 +39,14 @@ async function lazyInit(): Promise<void> {
     // playwright not installed or browser binaries missing — remain unavailable
   }
 }
-
-export const WebBrowserTool: Tool = {
+export const WebBrowserTool = buildTool({
   name: 'WebBrowser',
   description: `Interact with web pages using an embedded browser: navigate, screenshot, click, type, scroll.
 
 Use for JavaScript-heavy SPAs, authenticated pages, or UI interaction testing.
 NOTE: Requires browser runtime. If unavailable, use WebFetch for static content instead.`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -85,12 +83,12 @@ NOTE: Requires browser runtime. If unavailable, use WebFetch for static content 
     if (!driver || !driver.isAvailable()) {
       return {
         output: [
-          `[WebBrowser] Browser runtime unavailable.`,
+          `[WebBrowser] 浏览器运行时不可用 (browser runtime unavailable)。`,
           `URL: ${url}  Action: ${action}`,
           '',
-          'Playwright is not installed or browser binaries are missing.',
+          'Playwright 未安装或浏览器二进制缺失 (Playwright not installed or browser binaries missing)。',
           'Run: bun add playwright && bunx playwright install chromium',
-          'Falling back: use WebFetch for static content.',
+          '降级方案：改用 WebFetch 抓取静态内容 (fall back to WebFetch for static content)。',
         ].join('\n'),
         isError: false,
       }
@@ -128,4 +126,4 @@ NOTE: Requires browser runtime. If unavailable, use WebFetch for static content 
       return { output: `Browser error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
     }
   },
-}
+})

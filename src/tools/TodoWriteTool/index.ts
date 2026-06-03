@@ -5,6 +5,7 @@
 //   - 同时只能有一个 in_progress 任务
 //   - allDone=true 时自动清空
 //   - 一次性完成 3+ todo 且无验证步骤 → verification nudge
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import { getTodos, setTodos, type Todo, type TodoStatus } from '../../services/todo-state.js'
 
@@ -13,8 +14,7 @@ const STATUS_ICON: Record<TodoStatus, string> = {
   in_progress: '◉',
   completed: '✓',
 }
-
-export const TodoWriteTool: Tool = {
+export const TodoWriteTool = buildTool({
   name: 'TodoWrite',
   description: `Manage your task checklist for the current session.
 
@@ -29,7 +29,7 @@ Rules:
 - Pass the complete list each time (this replaces the current list entirely)
 
 Status values: "pending", "in_progress", "completed"`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -126,4 +126,4 @@ Status values: "pending", "in_progress", "completed"`,
     }
     return lines
   },
-}
+})

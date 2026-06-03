@@ -13,6 +13,7 @@ export interface StreamOptions {
   system?: string
   enablePromptCaching?: boolean
   tools?: ToolSchema[]
+  abortSignal?: AbortSignal
 }
 
 export async function* streamMessageAnthropic(
@@ -42,7 +43,7 @@ export async function* streamMessageAnthropic(
           tool_choice: { type: 'auto' as const },
         }
       : {}),
-  })
+  }, { signal: options.abortSignal })
 
   let currentToolId = ''
   let currentToolName = ''
@@ -70,9 +71,11 @@ export async function* streamMessageAnthropic(
 
       case 'content_block_stop': {
         if (currentToolId) {
+          // 入参 JSON parse 失败 = 被输出上限截断在工具调用中途，标记 incomplete 让上层拒绝执行
           let input: Record<string, unknown> = {}
-          try { input = JSON.parse(inputJsonBuffer) } catch { /* partial */ }
-          yield { type: 'tool_use', id: currentToolId, name: currentToolName, input }
+          let incomplete = false
+          try { input = JSON.parse(inputJsonBuffer) } catch { incomplete = true }
+          yield { type: 'tool_use', id: currentToolId, name: currentToolName, input, incomplete }
           currentToolId = ''
           currentToolName = ''
           inputJsonBuffer = ''
@@ -81,10 +84,24 @@ export async function* streamMessageAnthropic(
       }
 
       case 'message_stop': {
+        // 撞 max_tokens 时 content_block_stop 可能不触发：在这里兜底 flush 未完成的 tool_use
+        if (currentToolId) {
+          let input: Record<string, unknown> = {}
+          try { input = JSON.parse(inputJsonBuffer) } catch { /* truncated */ }
+          yield { type: 'tool_use', id: currentToolId, name: currentToolName, input, incomplete: true }
+          currentToolId = ''
+          currentToolName = ''
+          inputJsonBuffer = ''
+        }
         const finalMsg: SDKMessage = await stream.finalMessage()
         yield {
           type: 'message_stop',
           usage: { input_tokens: finalMsg.usage.input_tokens, output_tokens: finalMsg.usage.output_tokens },
+          stopReason: finalMsg.stop_reason === 'max_tokens' ? 'max_tokens'
+            : finalMsg.stop_reason === 'tool_use' ? 'tool_use'
+            : finalMsg.stop_reason === 'end_turn' ? 'end_turn'
+            : finalMsg.stop_reason === 'stop_sequence' ? 'stop_sequence'
+            : 'other',
         }
         return
       }

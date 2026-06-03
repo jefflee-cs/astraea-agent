@@ -9,11 +9,23 @@ import type { ToolSchema } from '../tools/Tool'
 
 let _openaiClient: OpenAI | null = null
 
+// 推理系列模型（o1 / o3 / o4-mini / gpt-5 …）在 Chat Completions 上拒绝 `max_tokens`，
+// 必须改用 `max_completion_tokens`，否则返回 400 unsupported_parameter，导致「无任何回复」。
+// 这些模型还不支持自定义 temperature（默认即可），我们本就没传，无需特殊处理。
+export function isReasoningModel(model: string): boolean {
+  return /^o\d/i.test(model) || /^gpt-5/i.test(model)
+}
+
 function getOpenAIClient(): OpenAI {
   if (!_openaiClient) {
     _openaiClient = new OpenAI({
       apiKey: config.openai.apiKey,
       baseURL: config.openai.baseUrl,
+      // 429 (TPM/RPM 限流) 由 SDK 自动重试：它会读取响应的 retry-after / retry-after-ms
+      // 头，按服务端建议的时长退避后重试。默认只重试 2 次，对低配额账号（如 gpt-4o
+      // 30k TPM）每轮都要重发完整 system prompt + 工具 schema，很容易短暂超限，2 次不够。
+      // 提到 5 次，覆盖「刚好略微超限、等几百毫秒~几秒即可」的常见瞬时限流。
+      maxRetries: 5,
     })
   }
   return _openaiClient
@@ -72,6 +84,8 @@ export async function* streamMessageOpenAI(
   const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>()
   let inputTokens = 0
   let outputTokens = 0
+  let truncated = false   // finish_reason === 'length' → 撞输出上限被截断
+  let finishReason: string | null = null
 
   const openaiTools: OpenAI.Chat.ChatCompletionTool[] | undefined =
     options.tools?.map((t: ToolSchema) => ({
@@ -83,14 +97,26 @@ export async function* streamMessageOpenAI(
       },
     }))
 
+  // 推理模型用 max_completion_tokens，其余用 max_tokens（见 isReasoningModel 注释）
+  const reasoning = isReasoningModel(config.openai.model)
+  const tokenLimit = reasoning
+    ? { max_completion_tokens: config.openai.maxTokens }
+    : { max_tokens: config.openai.maxTokens }
+
+  // reasoning_effort（none|low|medium|high|xhigh）仅 gpt-5.x / o 系列接受，且需用户显式配置
+  const reasoningParam = reasoning && config.openai.reasoningEffort
+    ? { reasoning_effort: config.openai.reasoningEffort as 'low' | 'medium' | 'high' }
+    : {}
+
   const stream = await client.chat.completions.create({
     model: config.openai.model,
-    max_tokens: config.openai.maxTokens,
+    ...tokenLimit,
+    ...reasoningParam,
     messages: chatMessages,
     stream: true,
     stream_options: { include_usage: true },
     ...(openaiTools?.length ? { tools: openaiTools, tool_choice: 'auto' } : {}),
-  })
+  }, { signal: options.abortSignal })
 
   for await (const chunk of stream) {
     const choice = chunk.choices[0]
@@ -120,19 +146,27 @@ export async function* streamMessageOpenAI(
       }
     }
 
-    if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop') {
+    if (choice.finish_reason && !finishReason) {
+      finishReason = choice.finish_reason
+      truncated = finishReason === 'length'
       for (const [, buf] of toolCallBuffers) {
+        // 截断时入参 JSON 多半残缺：parse 失败标记 incomplete，让上层拒绝执行而非写空文件
         let input: Record<string, unknown> = {}
-        try { input = JSON.parse(buf.args) } catch { /* partial */ }
-        yield { type: 'tool_use', id: buf.id, name: buf.name, input }
+        let incomplete = false
+        try { input = JSON.parse(buf.args) } catch { incomplete = true }
+        yield { type: 'tool_use', id: buf.id, name: buf.name, input, incomplete: incomplete || truncated }
       }
       toolCallBuffers.clear()
-
-      yield {
-        type: 'message_stop',
-        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-      }
-      return
+      // 不在此 return：usage 在带 finish_reason 之后的「空 choices」chunk 里，读完才有真实 output_tokens
     }
+  }
+
+  yield {
+    type: 'message_stop',
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    stopReason: truncated ? 'max_tokens'
+      : finishReason === 'tool_calls' ? 'tool_use'
+      : finishReason === 'stop' ? 'end_turn'
+      : 'other',
   }
 }

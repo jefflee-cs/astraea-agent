@@ -2,11 +2,12 @@
 // 创建一个可追踪的结构化工作项，返回 taskId 供后续工具引用
 // 注意：这里的 Task 是 TaskRecord（进度追踪），不是子 Agent（见 AgentTool）
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { generateTaskId, setState, getState } from '../../services/agent-state.js'
 import type { TaskRecordState } from '../../services/agent-state.js'
 
-export const TaskCreateTool: Tool = {
+export const TaskCreateTool = buildTool({
   name: 'TaskCreate',
   description: `Create a trackable task record to make your work observable to the user.
 
@@ -17,7 +18,7 @@ Use to:
 
 Returns a taskId. Use TaskUpdate to advance its status, TaskGet to query it.
 This is different from Agent — TaskCreate is a progress-tracking record, not an AI sub-agent.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -67,7 +68,7 @@ This is different from Agent — TaskCreate is a progress-tracking record, not a
       }),
     }
   },
-}
+})
 
 export function getTaskRecords(): TaskRecordState[] {
   return Object.values(getState().tasks).filter(

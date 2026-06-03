@@ -18,6 +18,11 @@ export const MODE_OPTIONS: ModeOption[] = [
     description: 'read-only planning, file writes blocked',
   },
   {
+    value: 'cruise',
+    label: 'cruise',
+    description: 'auto-accept file edits, shell still asks',
+  },
+  {
     value: 'forge',
     label: 'forge',
     description: 'auto-accept all changes, skip confirmations',

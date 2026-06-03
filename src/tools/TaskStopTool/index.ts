@@ -1,11 +1,12 @@
 // TaskStopTool — 协作式取消运行中的子 Agent
 // 通过 AbortController 发送取消信号，子 Agent 自主选择退出时机
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { killAgentTask, getState } from '../../services/agent-state.js'
 import { enqueueAgentNotification } from '../../services/notification-queue.js'
 
-export const TaskStopTool: Tool = {
+export const TaskStopTool = buildTool({
   name: 'TaskStop',
   description: `Stop a running sub-agent by sending it a cooperative cancellation signal.
 
@@ -18,7 +19,7 @@ Use when:
 - An agent appears stuck
 
 The agent will emit a <task_notification status="killed"> when it stops.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -52,4 +53,4 @@ The agent will emit a <task_notification status="killed"> when it stops.`,
 
     return { output: `Agent "${taskId}" cancellation signal sent. It will stop at the next safe checkpoint.` }
   },
-}
+})

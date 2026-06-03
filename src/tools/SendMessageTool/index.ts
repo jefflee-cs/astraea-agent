@@ -1,11 +1,12 @@
 // SendMessageTool — 向其他 Agent 或 Claude 进程发送消息
 // 支持三种目标：本进程内子 Agent (taskId)、本机其他进程 (uds:...)
 
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult } from '../Tool.js'
 import { pushPendingMessage, getState } from '../../services/agent-state.js'
 import { sendToSocket } from '../../services/uds-server.js'
 
-export const SendMessageTool: Tool = {
+export const SendMessageTool = buildTool({
   name: 'SendMessage',
   description: `Send a message to a sub-agent or another Astraea process.
 
@@ -15,7 +16,7 @@ Supported targets:
 
 The sub-agent receives the message at its next turn boundary (between tool calls).
 Use ListPeers to discover sockets of other Astraea processes.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -68,4 +69,4 @@ Use ListPeers to discover sockets of other Astraea processes.`,
       isError: true,
     }
   },
-}
+})

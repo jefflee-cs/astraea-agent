@@ -8,11 +8,12 @@
 //   - 路径验证在执行前完成，早期失败
 import { resolve } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
+import { buildTool } from '../Tool'
 import type { Tool, ToolCallResult } from '../Tool'
 
 const MAX_RESULTS = 100
 
-export const GlobTool: Tool = {
+export const GlobTool = buildTool({
   name: 'Glob',
   description: `Find files matching a glob pattern. Returns sorted relative paths, up to 100 results.
 
@@ -24,7 +25,8 @@ Usage:
 
 If results are truncated, use a more specific pattern or narrow the search path.`,
 
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
 
   inputSchema: {
     type: 'object',
@@ -109,4 +111,4 @@ If results are truncated, use a more specific pattern or narrow the search path.
       return { output: `Glob error: ${err}`, isError: true }
     }
   },
-}
+})

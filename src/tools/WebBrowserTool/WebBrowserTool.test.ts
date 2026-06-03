@@ -40,7 +40,12 @@ class MockBrowserDriver implements BrowserDriver {
 }
 
 describe('WebBrowserTool — 运行时不可用', () => {
-  beforeEach(() => resetBrowserDriver())
+  // ⚠️ 不能用 resetBrowserDriver() 来制造「不可用」状态：lazyInit() 会在 Playwright
+  // 已安装的机器上自动拉起真实浏览器，于是测试在装了 Playwright 的环境（CI / 本机）
+  // 会失败。改为显式注入一个 isAvailable()=false 的 mock 驱动，确定性地走「不可用」分支，
+  // 与运行环境是否装了 Playwright 解耦。
+  beforeEach(() => injectBrowserDriver(new MockBrowserDriver(false)))
+  afterEach(() => resetBrowserDriver())
 
   test('无驱动时返回说明性内容（不报错）', async () => {
     const result = await WebBrowserTool.call({ url: 'https://app.example.com', action: 'navigate' }, { mode: "default" })
@@ -142,7 +147,8 @@ describe('WebBrowserTool — click & type', () => {
 
 describe('WebBrowserTool — 依赖注入验证', () => {
   test('injectBrowserDriver 替换驱动后立即生效', async () => {
-    resetBrowserDriver()
+    // 同样不用 resetBrowserDriver()（见上文说明）——注入一个不可用驱动来代表「初始无可用驱动」
+    injectBrowserDriver(new MockBrowserDriver(false))
     const result1 = await WebBrowserTool.call({ url: 'https://test.com' }, { mode: "default" })
     expect(result1.output).toContain('不可用')
 
@@ -156,7 +162,7 @@ describe('WebBrowserTool — 依赖注入验证', () => {
 
 describe('WebBrowserTool — 工具元数据', () => {
   test('工具名称正确', () => expect(WebBrowserTool.name).toBe('WebBrowser'))
-  test('isReadOnly 为 true', () => expect(WebBrowserTool.isReadOnly).toBe(true))
+  test('isReadOnly 为 true', () => expect(WebBrowserTool.isReadOnly({})).toBe(true))
   test('inputSchema 包含 url 和 action', () => {
     expect(WebBrowserTool.inputSchema.required).toContain('url')
     expect(WebBrowserTool.inputSchema.properties).toHaveProperty('action')

@@ -4,16 +4,18 @@
 // 安全保障（对齐原版 validateInput）：
 //   1. 写前必须读：文件已存在但从未被 Read → 拒绝，防止盲目覆盖
 //   2. mtime 守卫：读后文件被外部修改 → 拒绝，要求重新读
+import { buildTool } from '../Tool'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool'
 import { validateWrite, recordWrite } from '../readFileState'
+import { checkWritePermission } from '../fileWriteGate'
 
-export const FileWriteTool: Tool = {
+export const FileWriteTool = buildTool({
   name: 'Write',
   description: `Write content to a file, creating it if it does not exist and overwriting it if it does.
 Use this instead of echo redirection or cat heredoc in Bash.
 Always use absolute paths.
 IMPORTANT: If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.`,
-  isReadOnly: false,
+  isReadOnly: () => false,
   inputSchema: {
     type: 'object',
     properties: {
@@ -30,15 +32,14 @@ IMPORTANT: If this is an existing file, you MUST use the Read tool first to read
   },
 
   async call(input, ctx: ToolContext): Promise<ToolCallResult> {
-    if (ctx.mode === 'orbit') {
-      return {
-        output: '[orbit mode] File write blocked. Use ExitOrbitMode to present your plan and request approval first.',
-        isError: true,
-      }
-    }
-
     const filePath = input['file_path'] as string
     const content  = input['content']   as string
+
+    // ── 权限闸：模式取向 + 红线 + 交互/fail-closed（§1.3 / §5 / §3.0）──────
+    const gate = await checkWritePermission(filePath, ctx, 'write')
+    if (!gate.proceed) {
+      return { output: gate.rejection!, isError: true }
+    }
 
     // ── 安全校验：写前必须读 + mtime 守卫 ────────────────────────────────
     const rejection = validateWrite(filePath)
@@ -67,4 +68,4 @@ IMPORTANT: If this is an existing file, you MUST use the Read tool first to read
     const truncated = lineCount > 6 ? [...preview, `  … (${lineCount - 6} more lines)`] : preview
     return [`Written ${lineCount} lines → ${filePath}`, ...truncated]
   },
-}
+})

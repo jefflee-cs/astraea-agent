@@ -58,5 +58,5 @@ describe('SendUserFileTool — 正常交付', () => {
 
 describe('SendUserFileTool — 元数据', () => {
   test('工具名称正确', () => { expect(SendUserFileTool.name).toBe('SendUserFile') })
-  test('isReadOnly 为 true（无写副作用）', () => { expect(SendUserFileTool.isReadOnly).toBe(true) })
+  test('isReadOnly 为 true（无写副作用）', () => { expect(SendUserFileTool.isReadOnly({})).toBe(true) })
 })

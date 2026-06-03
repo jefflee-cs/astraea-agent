@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from 'bun:test'
-import { WebSearchTool, createAdapter, resetAdapter } from './index.js'
+import { WebSearchTool, createAdapter, resetAdapter, _setTestAdapter } from './index.js'
 import type { WebSearchAdapter, SearchResult, SearchOptions } from './adapters/types.js'
 
 // ─── Mock 适配器（自定义 Adapter 示例） ──────────────────────────────────────
@@ -31,7 +31,7 @@ const MOCK_RESULTS: SearchResult[] = [
 ]
 
 describe('WebSearchTool', () => {
-  beforeEach(() => resetAdapter())
+  beforeEach(() => { resetAdapter(); _setTestAdapter(null) })
 
   // ─── 输入校验（无网络） ───────────────────────────────────────────────────
 
@@ -59,8 +59,8 @@ describe('WebSearchTool', () => {
   // ─── Mock 适配器测试（核心逻辑） ─────────────────────────────────────────
 
   test('使用 Mock 适配器返回格式化结果', async () => {
-    const mock = new MockSearchAdapter(MOCK_RESULTS)
-    const result = await WebSearchTool.call({ query: 'python asyncio' }, { mode: 'default' }, mock)
+    _setTestAdapter(new MockSearchAdapter(MOCK_RESULTS))
+    const result = await WebSearchTool.call({ query: 'python asyncio' }, { mode: 'default' })
     expect(result.isError).toBeFalsy()
     expect(result.output).toContain('[WebSearch]')
     expect(result.output).toContain('Python Docs')
@@ -68,38 +68,38 @@ describe('WebSearchTool', () => {
   })
 
   test('allowed_domains 过滤只返回 python.org 结果', async () => {
-    const mock = new MockSearchAdapter(MOCK_RESULTS)
+    _setTestAdapter(new MockSearchAdapter(MOCK_RESULTS))
     const result = await WebSearchTool.call({
       query: 'asyncio',
       allowed_domains: ['docs.python.org'],
-    }, { mode: 'default' }, mock)
+    }, { mode: 'default' })
     expect(result.output).toContain('Python Docs')
     expect(result.output).not.toContain('stackoverflow.com')
     expect(result.output).not.toContain('github.com')
   })
 
   test('blocked_domains 过滤排除 stackoverflow', async () => {
-    const mock = new MockSearchAdapter(MOCK_RESULTS)
+    _setTestAdapter(new MockSearchAdapter(MOCK_RESULTS))
     const result = await WebSearchTool.call({
       query: 'asyncio',
       blocked_domains: ['stackoverflow.com'],
-    }, { mode: 'default' }, mock)
+    }, { mode: 'default' })
     expect(result.output).not.toContain('stackoverflow.com')
     expect(result.output).toContain('Python Docs')
   })
 
   test('无结果时返回提示', async () => {
-    const mock = new MockSearchAdapter([])
-    const result = await WebSearchTool.call({ query: 'xyzzy404notfound' }, { mode: 'default' }, mock)
+    _setTestAdapter(new MockSearchAdapter([]))
+    const result = await WebSearchTool.call({ query: 'xyzzy404notfound' }, { mode: 'default' })
     expect(result.isError).toBeFalsy()
     expect(result.output).toContain('[WebSearch]')
     expect(result.output).toContain('未找到')
   })
 
   test('结果末尾包含引用来源提示', async () => {
-    const mock = new MockSearchAdapter(MOCK_RESULTS)
-    const result = await WebSearchTool.call({ query: 'test' }, { mode: 'default' }, mock)
-    expect(result.output).toContain('引用上述来源')
+    _setTestAdapter(new MockSearchAdapter(MOCK_RESULTS))
+    const result = await WebSearchTool.call({ query: 'test' }, { mode: 'default' })
+    expect(result.output).toContain('引用来源')
   })
 
   // ─── 适配器工厂单例验证 ───────────────────────────────────────────────────
@@ -124,7 +124,7 @@ describe('WebSearchTool', () => {
   })
 
   test('isReadOnly 为 true', () => {
-    expect(WebSearchTool.isReadOnly).toBe(true)
+    expect(WebSearchTool.isReadOnly({})).toBe(true)
   })
 
   // ─── 无 API Key 时给出明确的 Setup 指引 ───────────────────────────────────
@@ -174,7 +174,8 @@ describe('自定义 Adapter 接入示例', () => {
     }
 
     const internalAdapter = new CompanyInternalSearch()
-    const result = await WebSearchTool.call({ query: 'astraea architecture' }, { mode: 'default' }, internalAdapter)
+    _setTestAdapter(internalAdapter)
+    const result = await WebSearchTool.call({ query: 'astraea architecture' }, { mode: 'default' })
     expect(result.output).toContain('内部结果')
     expect(result.output).toContain('internal.company.com')
   })

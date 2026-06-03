@@ -1,3 +1,4 @@
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 
 type Severity = 'error' | 'warning' | 'info'
@@ -7,14 +8,12 @@ interface Annotation {
   message: string
   severity: Severity
 }
-
 const SEVERITY_PREFIX: Record<Severity, string> = {
   error:   '🔴 error',
   warning: '🟡 warning',
   info:    '🔵 info',
 }
-
-export const ReviewArtifactTool: Tool = {
+export const ReviewArtifactTool = buildTool({
   name: 'ReviewArtifact',
   description: `Output a structured code review with per-line annotations and a summary.
 
@@ -22,7 +21,8 @@ This tool does NOT perform any analysis — it is a display container.
 The LLM generates the review content and passes it here for structured rendering.
 
 severity levels: "error" (must fix) | "warning" (recommend fix) | "info" (suggestion)`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object',
     properties: {
@@ -70,4 +70,4 @@ severity levels: "error" (must fix) | "warning" (recommend fix) | "info" (sugges
 
     return { output: lines.join('\n') }
   },
-}
+})

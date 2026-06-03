@@ -7,6 +7,7 @@
 //   "tavily"        → Tavily（需要 TAVILY_API_KEY）
 //   "exa"           → Exa 语义搜索（需要 EXA_API_KEY）
 //   "duckduckgo"    → DuckDuckGo Instant Answer（仅适合百科/定义类查询）
+import { buildTool } from '../Tool.js'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool.js'
 import type { WebSearchAdapter, SearchResult } from './adapters/types.js'
 import { DuckDuckGoAdapter } from './adapters/DuckDuckGoAdapter.js'
@@ -44,7 +45,6 @@ class NoApiKeyAdapter implements WebSearchAdapter {
     throw new Error(NO_KEY_MESSAGE)
   }
 }
-
 // ─── 适配器工厂（单例缓存） ──────────────────────────────────────────────────
 
 let _adapter: WebSearchAdapter | null = null
@@ -78,17 +78,21 @@ export function createAdapter(override?: WebSearchAdapter): WebSearchAdapter {
         )
     }
   }
-
   _adapter = adapter
   _adapterKey = cacheKey
   return adapter
 }
-
 export function resetAdapter(): void {
   _adapter = null
   _adapterKey = null
+  _testAdapter = null
 }
 
+// 测试专用：注入 mock 适配器（不影响生产代码路径）
+let _testAdapter: WebSearchAdapter | null = null
+export function _setTestAdapter(adapter: WebSearchAdapter | null): void {
+  _testAdapter = adapter
+}
 // ─── 结果格式化 ──────────────────────────────────────────────────────────────
 
 function formatResults(query: string, results: SearchResult[]): string {
@@ -98,7 +102,6 @@ function formatResults(query: string, results: SearchResult[]): string {
     lines.push('未找到相关结果。')
     return lines.join('\n')
   }
-
   results.slice(0, 10).forEach((r, i) => {
     lines.push(`${i + 1}. [${r.title}](${r.url})`)
     if (r.snippet) lines.push(`   ${r.snippet}`)
@@ -110,10 +113,9 @@ function formatResults(query: string, results: SearchResult[]): string {
   )
   return lines.join('\n')
 }
-
 // ─── 主工具 ──────────────────────────────────────────────────────────────────
 
-export const WebSearchTool = {
+export const WebSearchTool = buildTool({
   name: 'WebSearch',
   description: `Search the web for current information and return a list of relevant results.
 
@@ -126,7 +128,8 @@ Workflow for detailed answers (e.g. news summaries, documentation):
   3. Synthesize a complete answer from the fetched content.
 
 IMPORTANT: Do NOT pass search engines (google.com, bing.com, duckduckgo.com) as allowed_domains — those are search engines, not content sources. Use allowed_domains only for specific content sites (e.g. "docs.python.org", "bbc.com").`,
-  isReadOnly: true,
+  isReadOnly: () => true,
+  isConcurrencySafe: () => true,
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -148,7 +151,7 @@ IMPORTANT: Do NOT pass search engines (google.com, bing.com, duckduckgo.com) as 
     required: ['query'],
   },
 
-  async call(input: Record<string, unknown>, _ctx: ToolContext, _adapterOverride?: WebSearchAdapter): Promise<ToolCallResult> {
+  async call(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolCallResult> {
     const query = input['query'] as string
     const allowedDomains = input['allowed_domains'] as string[] | undefined
     const blockedDomains = input['blocked_domains'] as string[] | undefined
@@ -161,7 +164,7 @@ IMPORTANT: Do NOT pass search engines (google.com, bing.com, duckduckgo.com) as 
     }
 
     try {
-      const adapter = createAdapter(_adapterOverride as WebSearchAdapter | undefined)
+      const adapter = _testAdapter ?? createAdapter()
       const results = await adapter.search(query.trim(), { allowedDomains, blockedDomains })
       return { output: formatResults(query, results) }
     } catch (err: unknown) {
@@ -169,4 +172,4 @@ IMPORTANT: Do NOT pass search engines (google.com, bing.com, duckduckgo.com) as 
       return { output: `搜索失败：${msg}`, isError: true }
     }
   },
-}
+})
