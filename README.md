@@ -30,15 +30,15 @@ It runs in your terminal as either a **persistent REPL** (multi-turn, React Ink 
 
 | | |
 |---|---|
-| 🧩 **Multi-provider** | First-class support for **Anthropic**, **OpenAI**, and local **Ollama** — switch with a single env var. |
-| 🛰️ **Five session modes** | `default` · `orbit` (read-only planning) · `cruise` (auto-accept edits) · `forge` (bypass prompts) · `counsel` (confirm direction first). |
-| 🛡️ **Permission system** | A mode × behavior matrix with hard **red-lines** that can never be bypassed — auto-approve the safe, always gate the dangerous. |
-| 🔧 **Rich tool suite** | Files, shell (Bash + PowerShell), web (fetch / search / headless browser), LSP, MCP resources, and skills. |
-| 🤝 **Sub-agents** | Spawn worker agents, message peers, and fan out complex work — coordination tools included. |
-| ⏰ **Vigil scheduling** | Schedule one-off or recurring agent tasks that run headless via a background daemon. |
-| 🧠 **Memory & compaction** | Persistent file-based memory injection, prompt-cache-aware system prompts, and automatic context compaction. |
-| 💬 **WeChat integration** | Read and write WeChat conversations through driven automation. |
-| 🔍 **Web search** | Pluggable providers — **Tavily**, **Brave**, or **Exa** semantic search. |
+| **Multi-provider** | First-class support for **Anthropic**, **OpenAI**, and local **Ollama** — switch with a single env var. |
+| **Five session modes** | `default` · `orbit` (read-only planning) · `cruise` (auto-accept edits) · `forge` (bypass prompts) · `counsel` (confirm direction first). |
+| **Permission system** | A mode × behavior matrix with hard **red-lines** that can never be bypassed — auto-approve the safe, always gate the dangerous. |
+| **Rich tool suite** | Files, shell (Bash + PowerShell), web (fetch / search / headless browser), LSP, MCP resources, and skills. |
+| **Sub-agents** | Spawn worker agents, message peers, and fan out complex work — coordination tools included. |
+| **Vigil scheduling** | Schedule one-off or recurring agent tasks that run headless via a background daemon. |
+| **Memory & compaction** | Persistent file-based memory injection, prompt-cache-aware system prompts, and automatic context compaction. |
+| **WeChat integration** | Read and write WeChat conversations through driven automation. |
+| **Web search** | Pluggable providers — **Tavily**, **Brave**, or **Exa** semantic search. |
 
 ---
 
@@ -53,10 +53,20 @@ curl -fsSL https://bun.sh/install | bash
 Then clone and install dependencies:
 
 ```bash
-git clone <your-repo-url> astraea
+git clone https://github.com/anxelswanz/astraea-agent.git astraea
+# or via SSH
+# git clone git@github.com:anxelswanz/astraea-agent.git astraea
 cd astraea
 bun install
 ```
+
+Register the global `astraea` command (one-time). This symlinks the CLI into `~/.bun/bin`, which Bun's installer adds to your `PATH`:
+
+```bash
+bun link
+```
+
+Now you can launch Astraea from anywhere by typing `astraea`. (Prefer not to link? You can always run it in-place with `bun run repl` — see [Getting Started](#3--getting-started).)
 
 Configure your provider. Copy the example env and add a key:
 
@@ -73,7 +83,7 @@ ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx     # default
 # OLLAMA_MODEL=qwen2.5:7b
 ```
 
-> 💡 **Tip:** Personal API keys (search providers, etc.) can live in a global `~/.astraea/.env`, so every Astraea project reuses them and you never risk committing a secret. Create it with `mkdir -p ~/.astraea`.
+> **Tip:** Personal API keys (search providers, etc.) can live in a global `~/.astraea/.env`, so every Astraea project reuses them and you never risk committing a secret. Create it with `mkdir -p ~/.astraea`.
 
 Optional — enable web search by adding one of these to `~/.astraea/.env`:
 
@@ -89,7 +99,13 @@ TAVILY_API_KEY=tvly-xxx        # 1,000 req/mo, built for AI agents (recommended)
 
 ### Launch the interactive REPL
 
-The primary way to use Astraea — a persistent, multi-turn React Ink UI:
+The primary way to use Astraea — a persistent, multi-turn React Ink UI. If you ran `bun link` during install, just type:
+
+```bash
+astraea
+```
+
+Otherwise, run it in-place from the project directory:
 
 ```bash
 bun run repl
@@ -100,7 +116,7 @@ bun run src/repl.tsx
 You'll see the active provider and model printed on startup, then a prompt. Just start talking:
 
 ```
-✦ astraea › refactor src/query.ts to extract the streaming loop into its own module
+astraea › refactor src/query.ts to extract the streaming loop into its own module
 ```
 
 ### One-shot CLI
@@ -172,16 +188,6 @@ src/
 ├── mcp/                   # Model Context Protocol clients & instructions
 └── ui/                    # React Ink components
 ```
-
----
-
-## Inspiration
-
-Astraea stands on the shoulders of the agents that defined the category:
-
-- [**Claude Code**](https://github.com/anthropics/claude-code) — Anthropic's official terminal agent
-- [**Hermes Agent**](https://github.com/nousresearch/hermes-agent) — Nous Research
-- [**opencode**](https://github.com/anomalyco/opencode) — Anomaly
 
 ---
 
