@@ -31,6 +31,8 @@ import {
   checkTokenBudget,
 } from './utils/token-budget'
 
+import { loadMemoryIndex, buildRelevantMemoriesReminder } from './memory/inject'
+import { forceExtractMemories, maybeExtractMemories, noteExtractionTurn, clampExtractCursor } from './memory/extract'
 import { drainNotifications, hasPendingNotifications } from './services/notification-queue'
 import { hasRunningAgents } from './services/agent-state'
 import {
@@ -45,6 +47,8 @@ import { evaluateGoal, serializeTranscript } from './services/goal-evaluator'
 import { config } from './config'
 import { activeThresholds } from './services/compact/window'
 import { compactConversation, estimateTokens, isOverflowError } from './services/compact/compact'
+import { microcompact } from './services/compact/microCompact'
+import { recordAssistantTs } from './state/microcompactState'
 import {
   getInputTokens,
   recordInputTokens,
@@ -52,6 +56,15 @@ import {
   recordCompactionFailure,
   isCompactionTripped,
 } from './state/contextTokens'
+import {
+  eclipseActive,
+  projectForSend,
+  maybeSpawn,
+  commitIfNeeded,
+  blockingIfNeeded,
+  drainOnOverflow,
+  resetEclipse,
+} from './services/eclipse/eclipse'
 
 // ─────────────────────────── 事件类型 ───────────────────────────────────────
 
@@ -69,7 +82,8 @@ export type QueryEvent =
   | { type: 'goal_exhausted'; reason: string; condition: string; maxTurns: number }
   // ── 上下文压缩（autocompact）事件 ──
   | { type: 'compact_start'; trigger: 'auto' | 'manual'; preTokens: number }
-  | { type: 'compact_done'; trigger: 'auto' | 'manual'; willRetrigger: boolean }
+  | { type: 'compact_progress'; chars: number }
+  | { type: 'compact_done'; trigger: 'auto' | 'manual'; willRetrigger: boolean; messages: (UserMessage | AssistantMessage)[]; summary: string; preTokens: number }
   | { type: 'compact_failed'; reason: string }
   | { type: 'compact_tripped' }    // 熔断跳闸：停止自动压缩，提示用户手动处理
   | { type: 'compact_blocked'; usedTokens: number }  // autocompact 关闭 + 撞 0.98 硬阻塞
@@ -126,20 +140,44 @@ export async function* query(
 
   const system = appendSystemContext(options.system ?? '', sysCtx)
 
-  // 压缩用：系统 prompt + 工具定义的固定开销（每轮都在、压缩腾不掉）。chars/4 估算。
+  // <system-reminder>（CLAUDE.md + 日期）每轮为模型调用「新鲜注入」，但【不】持久进对话数组，
+  // 否则会逐轮在头部累积、膨胀上下文。取出 reminder 块，对话数组保持干净。
+  const reminderBlock = prependUserContext([], userCtx)[0]!
+  // 定稿 #10：MEMORY.md 索引走 reminder 块（每 query 调用新鲜读，反映会内写入）。
+  const memIndex = await loadMemoryIndex(cwd)
+  if (memIndex && typeof reminderBlock.content === 'string') {
+    reminderBlock.content += `\n\n<system-reminder>\n${memIndex}\n</system-reminder>`
+  }
+  const reminderChars = typeof reminderBlock.content === 'string' ? reminderBlock.content.length : 0
+
+  // 压缩用：系统 prompt + 工具定义 + reminder 的固定开销（每轮都在、压缩腾不掉）。chars/4 估算。
   // 仅当调用方显式 opt-in（主对话）时启用压缩相关逻辑，避免辅助 query 污染 token 单例。
   const compactionEnabled = options.autocompact === true
+  // 记忆提取（通道 B）只在主对话开（与 compaction 同一「主对话 opt-in」信号），
+  // 避免辅助/子 query 触发后台提取。
+  const memoryExtractionOn = compactionEnabled
   const fixedOverheadTokens = Math.ceil(
-    (system.length + JSON.stringify(toolSchemas).length) / 4,
+    (system.length + JSON.stringify(toolSchemas).length + reminderChars) / 4,
   )
 
-  // State: 每轮追加 assistantMessage + toolResultMessage
-  // Prepend <system-reminder> with claudeMd + date before the user's first message.
-  let messages: (UserMessage | AssistantMessage)[] = prependUserContext(
-    [...initialMessages],
-    userCtx,
-  )
+  // State: 每轮追加 assistantMessage + toolResultMessage。
+  // 对话数组保持干净（剥掉任何历史遗留的 reminder）；reminder 仅在 streamMessage 调用时前置。
+  let messages: (UserMessage | AssistantMessage)[] = stripReminders([...initialMessages])
   let turnCount = 1
+
+  // 定稿 #10/#12/#13：召回 ≤5 条相关记忆，拼到用户消息尾部（逐消息变，远离缓存前缀）。
+  // 每 query 调用跑一次（= 每条用户消息）；optional，失败/零记忆返回 null 不阻塞。
+  // recentTools 去噪：正用某工具时别召该工具用法、但召它的坑。
+  const recallSignal = options.abortSignal ?? new AbortController().signal
+  const recallResult = await buildRelevantMemoriesReminder(
+    latestUserText(messages),
+    cwd,
+    recallSignal,
+    recentToolNames(messages),
+  )
+  const relevantTail: UserMessage | null = recallResult
+    ? { role: 'user', content: recallResult.reminder }
+    : null
 
   // counsel 模式两段式闸（Permission & Safety Technical Spec §7）：
   //   ① counselConsulted    — 是否已通过 AskUserQuestion 向用户确认过方向
@@ -155,25 +193,41 @@ export async function* query(
   while (true) {
     yield { type: 'turn_start', turn: turnCount }
 
+    // ── 0a. Microcompact（先轻后重：排在 autocompact 之前；仅主对话）──────────
+    // time-based：离开 ≥ 阈值分钟后回来时，清空旧 tool 输出（保留骨架 + 最近 N 个）。
+    // 纯机械、不调模型。清理后用本地估算覆写 token 单例，让下面的 autocompact 检查读到
+    // 变小后的数——若已压回阈下，autocompact 本轮即 no-op，保住细粒度上下文。
+    if (compactionEnabled) {
+      const mc = microcompact(messages)
+      if (mc.cleared) {
+        messages = mc.messages
+        clampExtractCursor(messages.length) // 压缩重建消息数组后夹住提取游标（连带前置 #3）
+        recordInputTokens(estimateTokens(messages) + fixedOverheadTokens)
+      }
+    }
+
     // ── 0. Autocompact 检查（发请求前；仅主对话）────────────────────────────
     if (compactionEnabled) {
       const used = getInputTokens()
       if (used !== null) {
         const th = activeThresholds()
         if (config.autocompact) {
-          if (used >= th.autocompact && !isCompactionTripped()) {
+          // Eclipse 开启时压制【主动】autocompact（设计文档：折叠接管 0.85~0.95 带，防 autocompact
+          // 抢跑把细粒度一刀切）。reactive（413 兜底）不查 eclipseActive，仍能接溢出。
+          if (used >= th.autocompact && !isCompactionTripped() && !eclipseActive()) {
             yield { type: 'compact_start', trigger: 'auto', preTokens: used }
             try {
-              const res = await compactConversation(messages, {
+              const res = yield* compactConversation(messages, {
                 trigger: 'auto',
                 fixedOverheadTokens,
                 signal: options.abortSignal,
               })
               if (res.compacted) {
                 messages = res.messages
+                clampExtractCursor(messages.length) // 压缩重建消息数组后夹住提取游标（连带前置 #3）
                 recordInputTokens(estimateTokens(messages) + fixedOverheadTokens)
                 recordCompactionResult(res.willRetrigger ?? false)
-                yield { type: 'compact_done', trigger: 'auto', willRetrigger: res.willRetrigger ?? false }
+                yield { type: 'compact_done', trigger: 'auto', willRetrigger: res.willRetrigger ?? false, messages: res.messages, summary: res.summary ?? '', preTokens: res.preTokens ?? 0 }
                 if (isCompactionTripped()) yield { type: 'compact_tripped' }
               }
             } catch (err: unknown) {
@@ -196,6 +250,15 @@ export async function* query(
       }
     }
 
+    // ── 0b. Eclipse 折叠（发请求前；仅主对话，feature-gated，关闭时全 no-op）──────
+    // commit：到 0.85 吃后台 staged 存货、低 risk 先折（非阻塞，无模型调用）。
+    // blocking：到 0.95 存货不够 → 当场同步现折，主线程必须等完才放行。
+    // 提交只改 Eclipse store；真正瘦身发生在下方 streamMessage 的 projectForSend()。
+    if (compactionEnabled) {
+      commitIfNeeded(messages, fixedOverheadTokens)
+      await blockingIfNeeded(messages, fixedOverheadTokens, options.abortSignal)
+    }
+
     // ── 1. 调用模型，收集流式事件 ──────────────────────────────────────────
     const contentBlocks: (TextBlock | ToolUseBlock)[] = []
     const toolUseBlocks: ToolUseBlock[] = []
@@ -208,7 +271,7 @@ export async function* query(
     let assistantMessage: AssistantMessage | null = null
 
     try {
-      for await (const event of streamMessage(messages, {
+      for await (const event of streamMessage([reminderBlock, ...projectForSend(messages), ...(relevantTail ? [relevantTail] : [])], {
         system,
         enablePromptCaching: options.enablePromptCaching,
         tools: toolSchemas.length > 0 ? toolSchemas : undefined,
@@ -240,7 +303,13 @@ export async function* query(
           turnOutputTokens = event.usage.output_tokens
           stopReason = event.stopReason
           // 触发用聚合 input_tokens（仅主对话）：记最近一次响应的真值，供下轮阈值检查。
-          if (compactionEnabled) recordInputTokens(event.usage.input_tokens)
+          if (compactionEnabled) {
+            recordInputTokens(event.usage.input_tokens)
+            // Microcompact time-based 触发用：记下这一刻为"最后一条 assistant 时间"。
+            recordAssistantTs()
+            // Eclipse 后台 spawn：token 增量+起步闸触发（fire-and-forget，不阻塞本轮）。
+            maybeSpawn(messages, options.abortSignal)
+          }
         }
       }
     } catch (err: unknown) {
@@ -250,22 +319,29 @@ export async function* query(
         yield { type: 'done', messages: contentBlocks.length > 0 ? [...messages, partial] : messages }
         return
       }
+      // Eclipse 溢出急救（drain-then-reactive）：先排空 staged 折叠腾空间，静默重试本轮
+      // （projectForSend 会应用新折叠，prompt 变瘦，保细粒度）。没存货可排则落到 reactive 全量压缩。
+      if (compactionEnabled && isOverflowError(err) && eclipseActive()) {
+        if (drainOnOverflow().length > 0) continue
+      }
       // 反应式溢出兜底：请求因上下文超窗口被拒 → 强制压缩一次 → 重试本轮（设计文档 §8）。
       // 溢出在请求阶段发生，contentBlocks 此时为空，丢弃重试安全。每个 query() 调用至多一次。
       if (compactionEnabled && isOverflowError(err) && !reactiveCompacted && !isCompactionTripped()) {
         reactiveCompacted = true
         yield { type: 'compact_start', trigger: 'auto', preTokens: getInputTokens() ?? estimateTokens(messages) }
         try {
-          const res = await compactConversation(messages, {
+          const res = yield* compactConversation(messages, {
             trigger: 'auto',
             fixedOverheadTokens,
             signal: options.abortSignal,
           })
           if (res.compacted) {
             messages = res.messages
+            clampExtractCursor(messages.length) // 压缩重建消息数组后夹住提取游标（连带前置 #3）
+            resetEclipse() // 全量压缩后消息已重建，旧折叠施工图作废，清空 store
             recordInputTokens(estimateTokens(messages) + fixedOverheadTokens)
             recordCompactionResult(res.willRetrigger ?? false)
-            yield { type: 'compact_done', trigger: 'auto', willRetrigger: res.willRetrigger ?? false }
+            yield { type: 'compact_done', trigger: 'auto', willRetrigger: res.willRetrigger ?? false, messages: res.messages, summary: res.summary ?? '', preTokens: res.preTokens ?? 0 }
           }
           continue // 重试本轮（turnCount 不变）
         } catch (e2: unknown) {
@@ -416,6 +492,12 @@ export async function* query(
           turnCount++
           continue
         }
+      }
+
+      // 通道 B 停止钩子（#26）：模型给出最终回复、无 tool call → 强制提取一次（尾随不节流）。
+      // fire-and-forget，绝不阻塞交还控制权；失败/超时游标不动、下轮重试。
+      if (memoryExtractionOn) {
+        forceExtractMemories({ messages: [...messages, assistantMessage], system, cwd })
       }
 
       yield { type: 'done' as const, messages: [...messages, assistantMessage] }
@@ -601,6 +683,13 @@ export async function* query(
 
     messages = [...messages, assistantMessage, toolResultMessage]
 
+    // 通道 B 节奏（#26）：每个 turn 末推进节流计数；/goal 长跑中每 N turn 补一次增量提取，
+    // 避免目标完成时面对超长 span 一次性复盘。fire-and-forget。
+    if (memoryExtractionOn) {
+      noteExtractionTurn()
+      if (getActiveGoal()) maybeExtractMemories({ messages, system, cwd })
+    }
+
     // ESC 中止（工具执行阶段）：完整保存本轮结果后停止
     if (options.abortSignal?.aborted) {
       yield { type: 'done', messages }
@@ -616,6 +705,40 @@ export async function* query(
 
     turnCount++
   }
+}
+
+// 取最近一条用户消息的文本（跳过纯 tool_result 的 user 消息）—— 召回的 query。
+function latestUserText(msgs: (UserMessage | AssistantMessage)[]): string {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (!m || m.role !== 'user') continue
+    if (typeof m.content === 'string') return m.content
+    const texts = m.content.filter((b): b is TextBlock => b.type === 'text').map(b => b.text)
+    if (texts.length > 0) return texts.join('\n')
+  }
+  return ''
+}
+
+// 近期 assistant 调过的工具名（去重，最多 limit 个）—— 喂给召回做 recentTools 去噪。
+function recentToolNames(msgs: (UserMessage | AssistantMessage)[], limit = 8): string[] {
+  const names: string[] = []
+  for (let i = msgs.length - 1; i >= 0 && names.length < limit; i--) {
+    const m = msgs[i]
+    if (!m || m.role !== 'assistant') continue
+    for (const b of m.content) {
+      if (b.type === 'tool_use' && !names.includes(b.name)) names.push(b.name)
+    }
+  }
+  return names
+}
+
+// 剥掉对话数组里的 <system-reminder> 用户消息（reminder 仅每轮新鲜前置，不该持久累积）。
+function stripReminders(
+  msgs: (UserMessage | AssistantMessage)[],
+): (UserMessage | AssistantMessage)[] {
+  return msgs.filter(
+    m => !(m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('<system-reminder>')),
+  )
 }
 
 // ─────────────────────────── /goal 继续指令 ─────────────────────────────────

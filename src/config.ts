@@ -69,6 +69,13 @@ function autocompactEnabledFrom(): boolean {
   return !(raw === '0' || raw === 'false' || raw === 'off' || raw === 'no')
 }
 
+// Eclipse（上下文折叠）总开关：默认【关】；ASTRAEA_ECLIPSE 设为 1/true/on/yes → 开启。
+// 开启时：后台 ctx-agent 周期折叠中段、0.85 提交、0.95 阻塞现折，且压制主动 autocompact。
+function eclipseEnabledFrom(): boolean {
+  const raw = process.env.ASTRAEA_ECLIPSE?.trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes'
+}
+
 // 提前解析，供 maxTokens 的模型相关默认值复用（gpt-5.x vs gpt-4o 输出预算不同）
 const openaiModel = process.env.OPENAI_MODEL ?? 'gpt-4o'
 
@@ -77,6 +84,13 @@ export const config = {
 
   // autocompact 总开关（设计文档 §9）。关闭时走 0.98 硬阻塞。
   autocompact: autocompactEnabledFrom(),
+
+  // Eclipse 折叠总开关（默认关）。开启时压制主动 autocompact，由折叠接管 0.85~0.95 带。
+  eclipse: eclipseEnabledFrom(),
+
+  // ctx-agent 可选模型覆盖：默认用 querySmallModel 的 per-provider 小模型；
+  // 设了就用它（如想用更强模型提升折叠摘要保真度，不影响 WebFetch 等其它小模型调用方）。
+  ctxAgentModel: process.env.CTX_AGENT_MODEL?.trim() || undefined,
 
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY ?? '',

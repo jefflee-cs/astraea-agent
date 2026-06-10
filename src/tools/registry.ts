@@ -109,6 +109,16 @@ export function getWorkerTools(): Tool[] {
   ]
 }
 
+// 微信工具名集合 —— 仅可由用户显式 /wechat（直接执行）或 /vigil wechat（调度后
+// 由 headless 任务执行）触发，模型在普通交互对话里不得自行调用，故从交互工具集中剔除。
+export const WECHAT_TOOL_NAMES = new Set(['WechatRead', 'WechatWrite'])
+
+// 交互式主 Agent 工具集 —— 在 getAllTools() 基础上排除微信工具。
+// App.tsx 的对话/调度 query 一律用它；headless 执行（cli.ts）才用完整 listTools()。
+export function getInteractiveTools(): Tool[] {
+  return getAllTools().filter((t) => !WECHAT_TOOL_NAMES.has(t.name))
+}
+
 export function findTool(name: string): Tool | undefined {
   return getAllTools().find((t) => t.name === name)
 }

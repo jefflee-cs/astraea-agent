@@ -131,12 +131,17 @@ export function buildPostCompactMessages(summary: string, recent: ConvMessage[])
   return [summaryMsg, ...recent]
 }
 
-// ── 摘要生成：一次 streamMessage 调用 + 流式瞬时重试 ─────────────────────────
-async function streamCompactSummary(
+// 压缩进度事件（驱动 REPL 进度条）：chars = 已生成的摘要字符数。
+export type CompactProgress = { type: 'compact_progress'; chars: number }
+
+const PROGRESS_EMIT_EVERY = 500 // 每累积 ~500 字符 emit 一次，避免刷屏
+
+// ── 摘要生成：一次 streamMessage 调用 + 流式瞬时重试。边生成边 yield 进度 ──────
+async function* streamCompactSummary(
   messages: ConvMessage[],
   customInstructions: string | undefined,
   signal: AbortSignal | undefined,
-): Promise<string> {
+): AsyncGenerator<CompactProgress, string> {
   const eff = activeThresholds().effectiveWindow
   // 摘要专用输出上限：比正常输出小，避免一份摘要自己吃掉腾出的空间（设计文档 §7）。
   const summaryCap = Math.min(activeMaxTokens(), Math.max(4_000, Math.floor(eff * 0.15)))
@@ -149,13 +154,21 @@ async function streamCompactSummary(
   for (let attempt = 0; attempt <= MAX_STREAMING_RETRIES; attempt++) {
     try {
       let raw = ''
+      let lastEmit = 0
       for await (const ev of streamMessage(toSummarize, {
         system: buildCompactSystemPrompt(),
         maxTokens: summaryCap,
         abortSignal: signal,
       })) {
-        if (ev.type === 'text') raw += ev.text
+        if (ev.type === 'text') {
+          raw += ev.text
+          if (raw.length - lastEmit >= PROGRESS_EMIT_EVERY) {
+            lastEmit = raw.length
+            yield { type: 'compact_progress', chars: raw.length }
+          }
+        }
       }
+      yield { type: 'compact_progress', chars: raw.length }
       return raw
     } catch (err) {
       // 溢出错误不重试，直接上抛让 PTL 截头逻辑处理；中止也直接上抛。
@@ -189,10 +202,10 @@ export interface CompactOptions {
  * 压缩主入口。成功返回新消息 + willRetrigger；硬失败（PTL/流式重试耗尽）抛出，
  * 由调用方记一次熔断硬失败。对话过小则跳过（compacted:false, reason:'too_small'）。
  */
-export async function compactConversation(
+export async function* compactConversation(
   messages: ConvMessage[],
   opts: CompactOptions,
-): Promise<CompactResult> {
+): AsyncGenerator<CompactProgress, CompactResult> {
   if (messages.length < MIN_MESSAGES_TO_COMPACT) {
     return { compacted: false, messages, reason: 'too_small' }
   }
@@ -212,7 +225,7 @@ export async function compactConversation(
   let rawSummary: string | undefined
   for (let ptl = 0; ptl <= MAX_PTL_RETRIES; ptl++) {
     try {
-      rawSummary = await streamCompactSummary(summaryInput, mergedInstructions, opts.signal)
+      rawSummary = yield* streamCompactSummary(summaryInput, mergedInstructions, opts.signal)
       break
     } catch (err) {
       if (isOverflowError(err) && ptl < MAX_PTL_RETRIES) {

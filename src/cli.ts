@@ -10,6 +10,7 @@ import { query } from './query'
 import { listTools } from './tools/registry'
 import { createUserMessage } from './types/message'
 import { getSystemPrompt } from './context/systemPrompt/builder'
+import { setMode } from './state/sessionMode'
 import { writeFileSync } from 'node:fs'
 
 const args = process.argv.slice(2)
@@ -141,6 +142,12 @@ async function runHeadlessTask(taskId: string, prompt: string, resultFile?: stri
 
   console.error(`[vigil:headless] task=${taskId}`)
 
+  // 调度时 VigilOnce 确认框已整单预授权该任务，且 headless 进程无人值守、无 UI/TTY 可
+  // 应答任何确认框。故切到 forge 模式：文件写 / shell 自动放行，只有红线敏感路径
+  // （.git/ .astraea/ shell 配置）仍被拦截。否则 default 模式下文件写走 'ask' 闸，在无
+  // 应答者的子进程里要么挂死、要么被判 "cancelled"，任务白跑、文件永不落地。
+  setMode('forge')
+
   // isReadOnly 现在是函数，用空 input 保守判断（无 input 时默认视为写操作）
   const writeToolNames = new Set(tools.filter(t => !t.isReadOnly({})).map(t => t.name))
 
@@ -150,21 +157,50 @@ async function runHeadlessTask(taskId: string, prompt: string, resultFile?: stri
   const filesWritten: string[] = []
   const toolErrors: string[] = []
 
-  for await (const event of query(messages, tools, { system, maxTurns: 15, enablePromptCaching: true })) {
-    if (event.type === 'text') {
-      outputParts.push(event.text)
-    } else if (event.type === 'tool_result' && writeToolNames.has(event.name)) {
-      // Capture write-tool outcomes as ground truth — independent of LLM text
-      const filePath = event.input['file_path'] as string | undefined
-      if (event.isError) {
-        toolErrors.push(`${event.name}(${filePath ?? '?'}): ${event.output}`)
-      } else if (filePath) {
-        filesWritten.push(filePath)
+  // 自带 wall-clock 看门狗：headless 无人值守，一旦模型/流式调用卡住（无 abort 信号时
+  // 会永久空转），这里在 daemon 的硬 SIGKILL 之前先 abort，给 query() 一个干净收尾、
+  // 把部分结果写盘的机会。两层防护：可被 abort 打断的异步卡死走这里；纯同步空转兜底
+  // 靠 daemon 的 SIGKILL。
+  const timeoutMs = Number(process.env.ASTRAEA_HEADLESS_TIMEOUT_MS) || 4 * 60_000
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), Math.max(10_000, timeoutMs - 15_000))
+
+  let caught: unknown = null
+  try {
+    for await (const event of query(messages, tools, {
+      system,
+      maxTurns: 15,
+      enablePromptCaching: true,
+      // 无人值守：isInteractive=false。预授权由上面的 forge 模式承担（写/shell 放行）；
+      // 残留的 'ask'（仅红线敏感路径会走到）在此 fail-closed deny，而非挂在一个没人能
+      // 应答的 readline 确认框上把整个任务拖死。
+      isInteractive: false,
+      abortSignal: controller.signal,
+    })) {
+      if (event.type === 'text') {
+        outputParts.push(event.text)
+      } else if (event.type === 'tool_result' && writeToolNames.has(event.name)) {
+        // Capture write-tool outcomes as ground truth — independent of LLM text
+        const filePath = event.input['file_path'] as string | undefined
+        if (event.isError) {
+          toolErrors.push(`${event.name}(${filePath ?? '?'}): ${event.output}`)
+        } else if (filePath) {
+          filesWritten.push(filePath)
+        }
       }
     }
+  } catch (err: unknown) {
+    caught = err
+  } finally {
+    clearTimeout(timer)
   }
 
-  const output = outputParts.join('')
+  const timedOut = controller.signal.aborted
+  const failed = timedOut || caught != null
+  const note = timedOut
+    ? '\n\n[headless] aborted after timeout — partial output above (if any).'
+    : caught != null ? `\n\n[headless] error: ${String(caught)}` : ''
+  const output = outputParts.join('') + note
 
   if (resultFile) {
     const result = {
@@ -175,9 +211,10 @@ async function runHeadlessTask(taskId: string, prompt: string, resultFile?: stri
       toolErrors: toolErrors.length > 0 ? toolErrors : undefined,
       completedAt: new Date().toISOString(),
       read: false,
+      failed: failed || undefined,
     }
     writeFileSync(resultFile, JSON.stringify(result, null, 2), 'utf-8')
-    console.error(`[vigil:headless] result written to ${resultFile}`)
+    console.error(`[vigil:headless] result written to ${resultFile}${failed ? ' (failed)' : ''}`)
   }
 }
 

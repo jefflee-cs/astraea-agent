@@ -62,15 +62,19 @@ async function readGitState(): Promise<string> {
 // Scoped by cwd: different projects get different user contexts.
 export const getUserContext = memoize(async (cwd: string): Promise<UserContext> => {
   const currentDate = new Date().toISOString().split('T')[0] ?? new Date().toISOString()
-  const claudeMd = await loadClaudeMd(cwd)
+  const claudeMd = await loadAgentsMd(cwd)
   return { claudeMd, currentDate }
 })
 
-async function loadClaudeMd(cwd: string): Promise<string> {
+// Astraea 的项目级指令文件是 AGENTS.md / AGENTS.local.md（定稿 #24），不是 CLAUDE.md。
+// 顺序：项目级 AGENTS.md（进 git）→ 个人级 AGENTS.local.md（不进 git）→ 全局 ~/.astraea/AGENTS.md。
+// /remember 把 auto-memory 提升到前两层后，必须由这里读出才生效（连带前置 #1）。
+async function loadAgentsMd(cwd: string): Promise<string> {
   const home = process.env.HOME ?? ''
   const paths = [
-    `${cwd}/CLAUDE.md`,
-    home ? `${home}/.claude/CLAUDE.md` : '',
+    `${cwd}/AGENTS.md`,
+    `${cwd}/AGENTS.local.md`,
+    home ? `${home}/.astraea/AGENTS.md` : '',
   ].filter(Boolean)
   const parts: string[] = []
   for (const p of paths) {

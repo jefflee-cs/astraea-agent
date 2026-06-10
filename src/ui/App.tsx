@@ -5,7 +5,7 @@ import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { Box, Text, Static, useApp, useInput, usePaste } from 'ink'
 import TextInput from 'ink-text-input'
 import { query } from '../query'
-import { listTools } from '../tools/registry'
+import { listTools, getInteractiveTools } from '../tools/registry'
 import { createUserMessage } from '../types/message'
 import type { UserMessage, AssistantMessage } from '../types/message'
 import { WelcomePanel } from './WelcomePanel'
@@ -27,6 +27,19 @@ import { getMode, setMode } from '../state/sessionMode'
 import type { SessionMode } from '../state/sessionMode'
 import { compactConversation, estimateTokens } from '../services/compact/compact'
 import { activeThresholds, percentLeft } from '../services/compact/window'
+import {
+  createTranscript,
+  reopenTranscript,
+  listSessions,
+  loadSessionMessages,
+  getLastAssistantTimestamp,
+  type TranscriptWriter,
+  type SessionSummary,
+} from '../services/transcript/transcript'
+import { scheduleHousekeeping } from '../services/transcript/housekeeping'
+import { resetEclipse } from '../services/eclipse/store'
+import { setLastAssistantTs, resetMicrocompactState } from '../state/microcompactState'
+import { ResumePicker } from './ResumePicker'
 import {
   resetContextTokens,
   markTokensUnknown,
@@ -128,6 +141,31 @@ interface HistoryEntry {
   lines?: string[]  // multi-line result display (tool_result only)
 }
 
+// /resume：把恢复的对话消息转成可滚动回看的 history 条目（仅展示 user/assistant 文本）。
+function rebuildHistoryEntries(
+  msgs: (UserMessage | AssistantMessage)[],
+  nextId: () => string,
+): HistoryEntry[] {
+  const out: HistoryEntry[] = []
+  for (const m of msgs) {
+    if (m.role === 'user') {
+      const raw = typeof m.content === 'string'
+        ? m.content
+        : m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('')
+      if (raw.includes('<conversation_summary>')) {
+        out.push({ id: nextId(), role: 'assistant', text: '─────────  ✦ (compacted summary)  ─────────' })
+        continue
+      }
+      const clean = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+      if (clean) out.push({ id: nextId(), role: 'user', text: clean })
+    } else {
+      const text = m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('').trim()
+      if (text) out.push({ id: nextId(), role: 'assistant', text })
+    }
+  }
+  return out
+}
+
 // ─────────────────────────── 主组件 ──────────────────────────────────────────
 
 export function App() {
@@ -142,7 +180,8 @@ export function App() {
   const [liveOutput, setLiveOutput] = useState<string>('')
   const [inputValue, setInputValue] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
-  const [isCompacting, setIsCompacting] = useState(false)  // 压缩进行中 → 显示 spinner
+  const [isCompacting, setIsCompacting] = useState(false)  // 压缩进行中
+  const [compactChars, setCompactChars] = useState(0)      // 已生成摘要字符数 → 驱动进度条
   // 粘贴折叠（像 Claude Code）：大段粘贴在输入框里只显示占位符 [Pasted text #N …]，
   // 真实内容存在 ref map 里，提交时展开喂给模型。
   const pasteStoreRef = useRef<Map<string, string>>(new Map())
@@ -157,6 +196,9 @@ export function App() {
   const [modeSelectorIndex, setModeSelectorIndex] = useState(0)
   const [pendingVigilPanel, setPendingVigilPanel] = useState(false)
   const [vigilPanelIndex, setVigilPanelIndex] = useState(0)
+  const [pendingResumePicker, setPendingResumePicker] = useState(false)
+  const [resumePickerIndex, setResumePickerIndex] = useState(0)
+  const resumeSessionsRef = useRef<SessionSummary[]>([])
   // Slash 命令选择器：高亮项索引。slashIndexRef 供 handleSubmit 同步读取（避免入 deps）。
   const [slashIndex, setSlashIndex] = useState(0)
   const slashIndexRef = useRef(0)
@@ -174,6 +216,9 @@ export function App() {
   const [configVersion, setConfigVersion] = useState(0)
 
   const conversationRef = useRef<(UserMessage | AssistantMessage)[]>([])
+  // transcript 落盘（设计文档 §10）：writer + 已写盘的 conversationRef 条数（增量日志用）
+  const transcriptRef = useRef<TranscriptWriter | null>(null)
+  const loggedLenRef = useRef(0)
   const entryIdRef = useRef(0)
   const commandHistoryRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
@@ -201,6 +246,38 @@ export function App() {
   // Load real system prompt on mount and rebuild whenever session mode changes
   // Also start UDS server for cross-process IPC (only on mount)
   useEffect(() => { startUDSServer() }, [])
+
+  // transcript：挂载时开新会话（或 --resume 恢复）+ 调度 housekeeping（设计文档 §10）。
+  useEffect(() => {
+    if (transcriptRef.current) { scheduleHousekeeping(); return }
+    const argv = process.argv.slice(2)
+    const ri = argv.indexOf('--resume')
+    if (ri !== -1) {
+      const idArg = argv[ri + 1] && !argv[ri + 1]!.startsWith('-') ? argv[ri + 1] : undefined
+      const sessions = listSessions(process.cwd())
+      const target = idArg
+        ? sessions.find(s => s.sessionId === idArg || s.sessionId.startsWith(idArg))
+        : sessions[0]
+      if (target) {
+        const msgs = loadSessionMessages(target.path)
+        conversationRef.current = msgs
+        loggedLenRef.current = msgs.length
+        transcriptRef.current = reopenTranscript(process.cwd(), target.sessionId)
+        markTokensUnknown()
+        // microcompact：从 transcript 回填最后一条 assistant 时间，让 resume 后首轮也能算 gap。
+        { const ts = getLastAssistantTimestamp(target.path); if (ts !== null) setLastAssistantTs(ts) }
+        setHistory([
+          { id: 'welcome', role: 'welcome', text: '' },
+          ...rebuildHistoryEntries(msgs, () => String(entryIdRef.current++)),
+          { id: String(entryIdRef.current++), role: 'assistant', text: `◎ resumed ${msgs.length} messages (--resume). Continue where you left off.` },
+        ])
+        scheduleHousekeeping()
+        return
+      }
+    }
+    transcriptRef.current = createTranscript(process.cwd())
+    scheduleHousekeeping()
+  }, [])
 
   // 输入变化时把 slash 选择器高亮重置到第 0 项（导航只改 slashIndex，不会触发此处）。
   useEffect(() => { setSlashIndex(0); slashIndexRef.current = 0 }, [inputValue])
@@ -244,7 +321,8 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    const tools = listTools()
+    // 交互对话不暴露微信工具（仅 /wechat、/vigil wechat 可触发），故系统提示里也不列出。
+    const tools = getInteractiveTools()
     const enabledTools = new Set(tools.map(t => t.name))
     getSystemPrompt({ modelId, enabledTools, mode: sessionMode }).then(prompt => {
       setSystemPrompt(prompt)
@@ -312,6 +390,22 @@ export function App() {
   // ── runConversation：统一的流式查询执行器 ──────────────────────────────────
   // 普通消息和 /goal 共用同一条流式管线。promptText 是喂给模型的内容，
   // displayText 是在 history 里展示为 "You: …" 的内容（默认与 promptText 相同）。
+  // 恢复一个历史会话：重建 conversationRef + history、续写其 transcript、token 计数作废。
+  const restoreSession = useCallback((target: SessionSummary) => {
+    const msgs = loadSessionMessages(target.path)
+    conversationRef.current = msgs
+    loggedLenRef.current = msgs.length
+    transcriptRef.current = reopenTranscript(process.cwd(), target.sessionId)
+    markTokensUnknown()
+    // microcompact：从 transcript 回填最后一条 assistant 时间，让 resume 后首轮也能算 gap。
+    { const ts = getLastAssistantTimestamp(target.path); if (ts !== null) setLastAssistantTs(ts) }
+    setHistory([
+      { id: 'welcome', role: 'welcome', text: '' },
+      ...rebuildHistoryEntries(msgs, () => String(entryIdRef.current++)),
+      { id: String(entryIdRef.current++), role: 'assistant', text: `◎ resumed session — ${msgs.length} messages restored. Continue where you left off.` },
+    ])
+  }, [])
+
   const runConversation = useCallback(
     async (promptText: string, displayText?: string) => {
       const controller = new AbortController()
@@ -350,7 +444,7 @@ export function App() {
       }
 
       try {
-        for await (const event of query(messages, listTools(), {
+        for await (const event of query(messages, getInteractiveTools(), {
           system: systemPrompt!,
           maxTurns: 20,
           enablePromptCaching: true,
@@ -451,12 +545,21 @@ export function App() {
             case 'compact_start': {
               flushAssistant()
               setActiveTool(null)
-              setIsCompacting(true)  // 转 spinner，不落永久行
+              setCompactChars(0)
+              setIsCompacting(true)  // 转进度条，不落永久行
+              break
+            }
+
+            case 'compact_progress': {
+              setCompactChars(event.chars)
               break
             }
 
             case 'compact_done': {
               setIsCompacting(false)
+              // transcript：写一条 compact 标记（含快照），并把已写盘长度重对齐到快照长度
+              transcriptRef.current?.appendCompact(event.messages, event.summary, event.preTokens, event.trigger)
+              loggedLenRef.current = event.messages.length
               setHistory(prev => [...prev, {
                 id: String(entryIdRef.current++),
                 role: 'assistant',
@@ -496,6 +599,15 @@ export function App() {
 
             case 'done': {
               conversationRef.current = event.messages
+              // transcript：增量写本轮新产生的消息（设计文档 §10 逐条 append）
+              {
+                const w = transcriptRef.current
+                if (w?.enabled) {
+                  const delta = event.messages.slice(loggedLenRef.current)
+                  if (delta.length) w.appendMessages(delta)
+                  loggedLenRef.current = event.messages.length
+                }
+              }
               // ESC 中止：UI 已在 ESC 处理器里更新（显示了 [cancelled]），这里只清理流式状态
               if (controller.signal.aborted) {
                 accumulated = ''
@@ -686,6 +798,10 @@ export function App() {
         // ③ 全局单例 —— goal、todos、所有在跑/已结束的调度任务
         clearGoal()                                   // 清除任何激活的目标
         resetContextTokens()                          // 清空上下文 token 计数 + 压缩熔断状态
+        resetMicrocompactState()                      // 清空 microcompact 时间戳单例（新会话重新计时）
+        resetEclipse()                                // 清空 Eclipse 折叠 store（跨会话不残留）
+        transcriptRef.current = createTranscript(process.cwd())  // 新会话 → 新 transcript 文件
+        loggedLenRef.current = 0
         for (const ns of getAllNamespaces()) clearTodos(ns)  // 清空所有命名空间的 todo
         const aborted = clearAllTasks()               // 协作式中止子 Agent 并丢弃任务字典
         setGoalTick(t => t + 1)
@@ -729,29 +845,37 @@ export function App() {
           }])
           return
         }
-        setHistory(prev => [...prev, {
-          id: String(entryIdRef.current++),
-          role: 'assistant',
-          text: '◌ /compact — compacting context…',
-        }])
         const overhead = Math.ceil(
           ((systemPrompt ?? '').length +
-            JSON.stringify(listTools().map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema }))).length) / 4,
+            JSON.stringify(getInteractiveTools().map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema }))).length) / 4,
         )
+        setCompactChars(0)
+        setIsCompacting(true)
         try {
-          const res = await compactConversation(conversationRef.current, {
+          // compactConversation 是 async generator：驱动它、把进度喂给进度条，done 时取返回值。
+          const gen = compactConversation(conversationRef.current, {
             trigger: 'manual',
             customInstructions: custom,
             fixedOverheadTokens: overhead,
           })
+          let r = await gen.next()
+          while (!r.done) {
+            if (r.value.type === 'compact_progress') setCompactChars(r.value.chars)
+            r = await gen.next()
+          }
+          const res = r.value
+          setIsCompacting(false)
           if (res.compacted) {
             conversationRef.current = res.messages
+            resetEclipse() // 手动 /compact 后消息已重建，旧折叠施工图作废
             recordInputTokens(estimateTokens(res.messages) + overhead)
             recordCompactionResult(res.willRetrigger ?? false)
+            transcriptRef.current?.appendCompact(res.messages, res.summary ?? '', res.preTokens ?? 0, 'manual')
+            loggedLenRef.current = res.messages.length
             setHistory(prev => [...prev, {
               id: String(entryIdRef.current++),
               role: 'assistant',
-              text: `✦ context compacted${res.willRetrigger ? ' (still large)' : ''}.`,
+              text: `─────────  ✦ context compacted${res.willRetrigger ? ' (still large)' : ''}  ─────────`,
             }])
           } else {
             setHistory(prev => [...prev, {
@@ -761,6 +885,7 @@ export function App() {
             }])
           }
         } catch (err: unknown) {
+          setIsCompacting(false)
           recordCompactionFailure()
           setHistory(prev => [...prev, {
             id: String(entryIdRef.current++),
@@ -768,6 +893,35 @@ export function App() {
             text: `⚠ /compact failed: ${String(err)}`,
           }])
         }
+        return
+      }
+
+      // ── /resume — 恢复历史会话（设计文档 §10）────────────────────────────────
+      if (trimmed === '/resume' || trimmed.startsWith('/resume ')) {
+        setInputValue('')
+        historyIndexRef.current = -1
+        const arg = trimmed.slice('/resume'.length).trim()
+        const sessions = listSessions(process.cwd())
+        if (sessions.length === 0) {
+          setHistory(prev => [...prev, { id: String(entryIdRef.current++), role: 'assistant', text: '◌ /resume — no past sessions in this directory.' }])
+          return
+        }
+        if (!arg) {
+          // 无参 → 打开键盘 picker（↑↓ 选 · Enter 恢复 · Esc 取消）
+          resumeSessionsRef.current = sessions.slice(0, 30)
+          setResumePickerIndex(0)
+          setPendingResumePicker(true)
+          return
+        }
+        const n = parseInt(arg, 10)
+        const target = (Number.isFinite(n) && n >= 1 && n <= sessions.length)
+          ? sessions[n - 1]
+          : sessions.find(s => s.sessionId === arg || s.sessionId.startsWith(arg))
+        if (!target) {
+          setHistory(prev => [...prev, { id: String(entryIdRef.current++), role: 'assistant', text: `⚠ /resume — session "${arg}" not found.` }])
+          return
+        }
+        restoreSession(target)
         return
       }
 
@@ -1005,6 +1159,7 @@ export function App() {
     updateProviderConfig(result.provider, result.model, result.apiKey)
     resetAllApiClients()
     markTokensUnknown()  // 换模型 → 旧分词器的 token 数作废，等新 usage 刷新（设计文档 §6）
+    resetEclipse()       // 换模型 → 折叠的 spawn token 计数按旧分词器，作废重来
     setConfigVersion(v => v + 1)  // 让 modelId 重算 → 触发 system prompt 按新模型重建
     await saveConfigToEnv()
     const successText = formatLoginSuccess(result)
@@ -1068,7 +1223,7 @@ export function App() {
     ;(async () => {
       let acc = ''
       try {
-        for await (const ev of query(msgs, listTools(), { system: systemPrompt, maxTurns: 10, enablePromptCaching: true })) {
+        for await (const ev of query(msgs, getInteractiveTools(), { system: systemPrompt, maxTurns: 10, enablePromptCaching: true })) {
           if (ev.type === 'text') { acc += ev.text; setStreamingText(acc) }
           else if (ev.type === 'done') {
             conversationRef.current = ev.messages
@@ -1100,7 +1255,7 @@ export function App() {
       historyIndexRef.current = -1
       setInputValue((prev) => prev + token)
     },
-    { isActive: !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !(pendingQuestion?.options?.length && !questionFreeText) },
+    { isActive: !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && !(pendingQuestion?.options?.length && !questionFreeText) },
   )
 
   // 提交时把占位符展开回真实内容（喂给模型）；消费后从 store 删除。
@@ -1142,6 +1297,22 @@ export function App() {
       return // 吞掉其它按键，确认期间不打字
     }
 
+    // ── ResumePicker 键盘控制 ─────────────────────────────────────────────────
+    if (pendingResumePicker) {
+      const list = resumeSessionsRef.current
+      if (key.escape) { setPendingResumePicker(false); return }
+      if (list.length === 0) { setPendingResumePicker(false); return }
+      if (key.upArrow) { setResumePickerIndex(i => (i - 1 + list.length) % list.length); return }
+      if (key.downArrow) { setResumePickerIndex(i => (i + 1) % list.length); return }
+      if (key.return) {
+        const target = list[resumePickerIndex]
+        setPendingResumePicker(false)
+        if (target) restoreSession(target)
+        return
+      }
+      return // 吞掉其它按键
+    }
+
     // ── VigilPanel 键盘控制 ───────────────────────────────────────────────────
     if (pendingVigilPanel) {
       if (key.escape) { setPendingVigilPanel(false); return }
@@ -1159,7 +1330,7 @@ export function App() {
           ;(async () => {
             let acc = ''
             try {
-              for await (const ev of query(msgs, listTools(), { system: systemPrompt!, maxTurns: 3, enablePromptCaching: true })) {
+              for await (const ev of query(msgs, getInteractiveTools(), { system: systemPrompt!, maxTurns: 3, enablePromptCaching: true })) {
                 if (ev.type === 'text') { acc += ev.text; setStreamingText(acc) }
                 else if (ev.type === 'done') {
                   conversationRef.current = ev.messages
@@ -1344,7 +1515,7 @@ export function App() {
     }
   })
 
-  const toolNames = listTools().map(t => t.name)
+  const toolNames = getInteractiveTools().map(t => t.name)
 
   const modelName =
     config.provider === 'ollama'
@@ -1356,7 +1527,7 @@ export function App() {
           : config.anthropic.model
 
   // 执行中输入框保持可用（不锁定）：用户可随时 /mode 切换。仅在模式/面板覆盖层时让出焦点。
-  const inputFocused = !pendingModeSelect && !pendingVigilPanel && !pendingConfirm
+  const inputFocused = !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker
   const inputPlaceholder = pendingQuestion
     ? 'Type your answer… (Esc to skip)'
     : isStreaming
@@ -1471,12 +1642,20 @@ export function App() {
         )
       })()}
 
-      {/* ◌ 压缩进行中 spinner（设计文档 §9）*/}
-      {isCompacting && (
-        <Box marginBottom={1}>
-          <Text color={INDIGO}>◌ compacting context…</Text>
-        </Box>
-      )}
+      {/* ◌ 压缩进度条（设计文档 §9）—— 摘要流式生成驱动 */}
+      {isCompacting && (() => {
+        const CELLS = 24
+        const TARGET = 60_000 // 典型摘要字符数（~15K tokens），到 99% 封顶等收尾
+        const frac = Math.min(0.99, compactChars / TARGET)
+        const filled = Math.round(frac * CELLS)
+        const bar = '█'.repeat(filled) + '░'.repeat(CELLS - filled)
+        const approxK = (compactChars / 4 / 1000).toFixed(1)
+        return (
+          <Box marginBottom={1}>
+            <Text color={INDIGO}>◌ compacting  [{bar}]  ~{approxK}K tokens</Text>
+          </Box>
+        )
+      })()}
 
       {/* ✦ 上下文用量指示器 —— 接近自动压缩时常驻提示（设计文档 §9）*/}
       {(() => {
@@ -1550,6 +1729,14 @@ export function App() {
         />
       )}
 
+      {/* ResumePicker — 历史会话恢复选择器（/resume） */}
+      {pendingResumePicker && (
+        <ResumePicker
+          sessions={resumeSessionsRef.current}
+          selectedIndex={resumePickerIndex}
+        />
+      )}
+
       {/* VigilPanel — 定时任务操作选择 */}
       {pendingVigilPanel && (
         <VigilPanel
@@ -1562,7 +1749,7 @@ export function App() {
 
       <TodoPanel />
 
-      {!showLogin && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && (
+      {!showLogin && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && (
         <ModeInputFrame mode={sessionMode}>
           {/* When a question with options is pending, hide the text input entirely —
               user navigates with ↑↓ + Enter just like the /mode selector.

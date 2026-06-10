@@ -27,7 +27,7 @@ import { getVoiceToneSection }        from './sections/voiceTone'
 import { getCounselModeSection }      from './sections/counselMode'
 import { systemPromptSection, uncachedSection, resolveSections } from './sections'
 import { computeEnvInfo }             from './envInfo'
-import { loadMemoryPrompt }           from '../memory-injections'
+import { loadMemoryInstructions }     from '../../memory/inject'
 import { getMcpInstructions }         from '../../mcp/instructions'
 import type { MCPServerConnection }   from '../../mcp/types'
 import { TOKEN_BUDGET_HINT_TEXT }     from '../../utils/token-budget'
@@ -55,11 +55,10 @@ export async function getSystemPrompt(options: SystemPromptOptions): Promise<str
         ? `# Language\nAlways respond in ${language}. Technical terms and code identifiers remain in their original form.`
         : null,
     ),
-    // Memory injections: project-scoped .md files from ~/.claude/projects/{slug}/memory/
-    // Cached per session (invalidated on /clear). Returns null → section omitted entirely.
-    systemPromptSection('memory', () => loadMemoryPrompt(cwd).then(m =>
-      m ? `# Memory\n${m}` : null
-    )),
+    // 记忆「行为指令」段（类型规范/怎么存/防漂移/边界）—— 定稿 #10：稳定进缓存前缀。
+    // 不含 MEMORY.md 索引/记忆正文（索引走 reminder 块，召回正文走用户消息尾部）。
+    // 会话级缓存（/clear 失效）。指令静态，永远非空。
+    systemPromptSection('memory', () => loadMemoryInstructions(cwd)),
     // MCP 插件说明：每轮强制重算，因为服务器可在会话中途上下线
     // DANGEROUS_UNCACHED — 跳过 prompt cache，每轮完整传输
     ...(mcpClients

@@ -11,6 +11,7 @@
 import type { ToolContext } from './Tool.js'
 import { fileWriteBehavior } from '../state/sessionMode.js'
 import { isSensitivePath } from '../config/redlines.js'
+import { isAnyMemoryPath } from '../memory/paths.js'
 import { confirmWithUser } from './BashTool/permissions/confirm.js'
 
 export interface WriteGateResult {
@@ -29,6 +30,11 @@ export async function checkWritePermission(
   ctx: ToolContext,
   action: string,
 ): Promise<WriteGateResult> {
+  // 定稿 #5：记忆子树写豁免，在红线之前评判。只放行 <base>/projects/<slug>/memory/**，
+  // 让 channel A（主代理自写记忆）不弹窗、channel B（后台提取、无人在场）不 fail-closed。
+  // settings.json/transcripts/plans 不在此子树，仍走红线，杜绝借记忆通道自我提权。
+  if (isAnyMemoryPath(filePath)) return { proceed: true }
+
   const sensitive = isSensitivePath(filePath)
   let behavior = fileWriteBehavior(ctx.mode)
 
