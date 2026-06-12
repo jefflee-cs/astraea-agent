@@ -8,6 +8,7 @@ import { buildTool } from '../Tool'
 import type { Tool, ToolCallResult, ToolContext } from '../Tool'
 import { validateWrite, recordWrite } from '../readFileState'
 import { checkWritePermission } from '../fileWriteGate'
+import { styleDiffLine } from '../diffStyle'
 
 export const FileWriteTool = buildTool({
   name: 'Write',
@@ -64,7 +65,8 @@ IMPORTANT: If this is an existing file, you MUST use the Read tool first to read
     const content = input['content'] as string
     const allLines = content.split('\n')
     const lineCount = allLines.length
-    const preview = allLines.slice(0, 6).map(l => `  ${l}`)
+    // 新建文件 = 纯添加 → 预览行整体走绿色背景带（注释灰、代码白）。
+    const preview = allLines.slice(0, 6).map(l => styleDiffLine(l, 'add', filePath))
     const truncated = lineCount > 6 ? [...preview, `  … (${lineCount - 6} more lines)`] : preview
     return [`Written ${lineCount} lines → ${filePath}`, ...truncated]
   },

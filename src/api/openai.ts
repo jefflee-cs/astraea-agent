@@ -98,7 +98,8 @@ export async function* streamMessageOpenAI(
     }))
 
   // 推理模型用 max_completion_tokens，其余用 max_tokens（见 isReasoningModel 注释）
-  const reasoning = isReasoningModel(config.openai.model)
+  const effectiveModel = options.model ?? config.openai.model
+  const reasoning = isReasoningModel(effectiveModel)
   const tokenLimit = reasoning
     ? { max_completion_tokens: options.maxTokens ?? config.openai.maxTokens }
     : { max_tokens: options.maxTokens ?? config.openai.maxTokens }
@@ -109,7 +110,7 @@ export async function* streamMessageOpenAI(
     : {}
 
   const stream = await client.chat.completions.create({
-    model: config.openai.model,
+    model: effectiveModel,
     ...tokenLimit,
     ...reasoningParam,
     messages: chatMessages,

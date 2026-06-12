@@ -22,6 +22,18 @@ if (args.includes('--daemon')) {
   process.exit(0)
 }
 
+// ── 管理子命令：astraea mcp … / plugin …（实现文档 §1.9）────────────────────
+if (args[0] === 'mcp') {
+  const { runMcpCommand } = await import('./cli/mcpCommand.js')
+  await runMcpCommand(args.slice(1))
+  process.exit(0)
+}
+if (args[0] === 'plugin') {
+  const { runPluginCommand } = await import('./cli/pluginCommand.js')
+  await runPluginCommand(args.slice(1))
+  process.exit(0)
+}
+
 // ── --headless --task 模式：执行单个 vigil 任务 ──────────────────────────────
 if (args.includes('--headless') && args.includes('--task')) {
   const taskId = process.env.ASTRAEA_HEADLESS_TASK_ID ?? args[args.indexOf('--task') + 1] ?? 'unknown'
@@ -76,6 +88,12 @@ async function main() {
     console.error(`[goal] active — working until: ${arg}`)
     userInput = arg  // condition 本身即 directive
   }
+
+  // 插件先加载（注册 skill/mcp 吸管），再连 MCP（含插件携带的 server）。失败容忍。
+  const { initPlugins } = await import('./plugins/init.js')
+  initPlugins()
+  const { initMcp } = await import('./mcp/registry.js')
+  await initMcp()
 
   const tools = listTools()
   const enabledTools = new Set(tools.map(t => t.name))
@@ -135,6 +153,8 @@ async function main() {
 // ── headless 任务执行（vigil daemon 触发，调用 LLM）────────────────────────
 async function runHeadlessTask(taskId: string, prompt: string, resultFile?: string): Promise<void> {
   const provider = config.provider
+  const { initMcp } = await import('./mcp/registry.js')
+  await initMcp()
   const tools = listTools()
   const enabledTools = new Set(tools.map(t => t.name))
   const modelId = provider === 'anthropic' ? config.anthropic.model

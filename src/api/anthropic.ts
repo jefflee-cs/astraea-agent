@@ -16,6 +16,8 @@ export interface StreamOptions {
   abortSignal?: AbortSignal
   // 单次输出上限覆盖（压缩摘要用更小的上限）。缺省回退到各 provider 配置的 maxTokens。
   maxTokens?: number
+  // 单次模型覆盖（skill frontmatter 的 model 字段经此 per-query 生效）。缺省回退到 provider 配置 model。
+  model?: string
 }
 
 export async function* streamMessageAnthropic(
@@ -35,7 +37,7 @@ export async function* streamMessageAnthropic(
     : undefined
 
   const stream = client.messages.stream({
-    model: config.anthropic.model,
+    model: options.model ?? config.anthropic.model,
     max_tokens: options.maxTokens ?? config.anthropic.maxTokens,
     system: system as string | undefined,
     messages: apiMessages,

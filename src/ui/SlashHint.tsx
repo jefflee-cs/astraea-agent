@@ -58,6 +58,18 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     enterAction: 'execute',
   },
   {
+    name: '/mcp',
+    summary: 'show MCP server status',
+    options: [],
+    enterAction: 'execute',
+  },
+  {
+    name: '/plugin',
+    summary: 'show installed plugins',
+    options: [],
+    enterAction: 'execute',
+  },
+  {
     name: '/clear',
     summary: 'clear conversation history',
     options: [],
@@ -85,10 +97,33 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 
 const INDIGO = '#6A5ACD'
 
+// Skill 命令派生为 slash 候选（统一命令表，实现文档 §1.2）：prompt 类 + user-invocable
+// + 非内置（避免与上方硬编码内置重复）。有 argument-hint → complete（补全等输参），否则 execute。
+function skillSlashCommands(): SlashCommand[] {
+  try {
+    const { getCommands } = require('../commands/registry') as typeof import('../commands/registry')
+    return getCommands()
+      .filter(c => c.type === 'prompt' && c.userInvocable && c.source !== 'builtin')
+      .map(c => ({
+        name: `/${c.name}`,
+        summary: c.description,
+        options: c.argumentHint ? [c.argumentHint] : [],
+        enterAction: (c.argumentHint ? 'complete' : 'execute') as SlashCommand['enterAction'],
+      }))
+  } catch {
+    return []
+  }
+}
+
+/** 内置 + skill 合并候选（skill 接在内置之后）。 */
+export function allSlashCommands(): SlashCommand[] {
+  return [...SLASH_COMMANDS, ...skillSlashCommands()]
+}
+
 // 前缀匹配 + 声明顺序；input === '/' 时列出全部。精确匹配也保留（单一路径）。
 export function matchSlashCommands(input: string): SlashCommand[] {
   if (!input.startsWith('/') || input.includes(' ')) return []
-  return SLASH_COMMANDS.filter(c => c.name.startsWith(input))
+  return allSlashCommands().filter(c => c.name.startsWith(input))
 }
 
 interface SlashHintProps {

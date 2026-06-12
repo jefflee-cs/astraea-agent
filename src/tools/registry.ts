@@ -39,8 +39,13 @@ import { ListMcpResourcesTool } from './ListMcpResourcesTool'
 import { ReadMcpResourceTool } from './ReadMcpResourceTool'
 import { SendUserFileTool } from './SendUserFileTool'
 import { ReviewArtifactTool } from './ReviewArtifactTool'
+import { getMcpTools } from '../mcp/registry'
 
 export function getAllTools(): Tool[] {
+  return [...getBuiltinToolList(), ...getMcpTools()]
+}
+
+function getBuiltinToolList(): Tool[] {
   return [
     BashTool,
     FileReadTool,

@@ -13,6 +13,7 @@ import type { Tool, ToolCallResult, ToolContext } from '../Tool'
 import { validateWrite, recordWrite } from '../readFileState'
 import { checkWritePermission } from '../fileWriteGate'
 import { findActualString, preserveQuoteStyle, applyEdit, formatDiff } from './utils'
+import { styleDiffLine } from '../diffStyle'
 
 export const FileEditTool = buildTool({
   name: 'Edit',
@@ -178,6 +179,11 @@ Common patterns:
     const added = diffLines.filter(l => l.startsWith('+')).length
     const removed = diffLines.filter(l => l.startsWith('-')).length
     const header = `Updated → ${filePath}  (+${added} / -${removed})`
-    return [header, ...diffLines.map(l => `  ${l}`)]
+    // 每行渲染成满宽背景带：'+ '/'-' → 类型，slice(2) 去掉 formatDiff 的标记+空格取正文。
+    const banded = diffLines.map(l => {
+      const type = l[0] === '+' ? 'add' : 'remove'
+      return styleDiffLine(l.slice(2), type, filePath)
+    })
+    return [header, ...banded]
   },
 })

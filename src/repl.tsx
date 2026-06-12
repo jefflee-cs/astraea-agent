@@ -9,6 +9,20 @@ import { App } from './ui/App'
 import { assertConfig, config } from './config'
 import { listTools } from './tools/registry'
 
+// 管理子命令：`astraea mcp …` / `astraea plugin …`（全局 bin 指向本文件）。
+// 在渲染 REPL 之前拦截，跑完即退，不进 Ink UI。
+const argv = process.argv.slice(2)
+if (argv[0] === 'mcp') {
+  const { runMcpCommand } = await import('./cli/mcpCommand')
+  await runMcpCommand(argv.slice(1))
+  process.exit(0)
+}
+if (argv[0] === 'plugin') {
+  const { runPluginCommand } = await import('./cli/pluginCommand')
+  await runPluginCommand(argv.slice(1))
+  process.exit(0)
+}
+
 assertConfig()
 
 const provider = config.provider

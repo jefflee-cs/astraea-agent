@@ -3,7 +3,7 @@
 
 import React from 'react'
 import { Box, Text } from 'ink'
-import TextInput from 'ink-text-input'
+import TextInput from './TextInput'
 
 export interface VigilAction {
   key: string

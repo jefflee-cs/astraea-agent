@@ -44,7 +44,9 @@ import {
 } from './state/goalState'
 import { evaluateGoal, serializeTranscript } from './services/goal-evaluator'
 
-import { config } from './config'
+import { config, activeContextWindow } from './config'
+import { getCommands } from './commands/registry'
+import { buildSkillMenu } from './commands/menu'
 import { activeThresholds } from './services/compact/window'
 import { compactConversation, estimateTokens, isOverflowError } from './services/compact/compact'
 import { microcompact } from './services/compact/microCompact'
@@ -93,7 +95,7 @@ export type QueryEvent =
 
 export interface QueryOptions {
   system?: string
-  maxTurns?: number          // 默认 10，防无限循环
+  maxTurns?: number          // 默认 50，防无限循环（探索类任务 10 太低会腰斩）
   enablePromptCaching?: boolean
   cwd?: string               // 用于 session preamble 的工作目录（默认 process.cwd()）
   tokenBudget?: number | null  // 输出 token 预算上限（null = 无限制）
@@ -103,6 +105,8 @@ export interface QueryOptions {
   // 仅主对话开启：发请求前 autocompact 检查 + token 计数 + 反应式溢出兜底（设计文档 §3/§6/§8）。
   // App 的辅助 query 调用（welcome/mode 等）不开启，避免污染主对话的 token 单例。
   autocompact?: boolean
+  // 单次模型覆盖（skill frontmatter 的 model 经此 per-query 生效，实现文档 §1.6）。缺省用全局 config。
+  model?: string
 }
 
 // ─────────────────────────── 主函数 ─────────────────────────────────────────
@@ -112,7 +116,7 @@ export async function* query(
   tools: Tool[],
   options: QueryOptions = {},
 ): AsyncGenerator<QueryEvent> {
-  const maxTurns = options.maxTurns ?? 10
+  const maxTurns = options.maxTurns ?? 50
   // 当 /goal 激活时，正常的 maxTurns 会过早截断目标循环。目标循环改用更高的
   // GOAL_MAX_TURNS 作为硬上限（condition 自带的 turn/time 子句由 evaluator 判定）。
   const turnCap = () => (getActiveGoal() ? Math.max(maxTurns, GOAL_MAX_TURNS) : maxTurns)
@@ -138,7 +142,15 @@ export async function* query(
     getUserContext(cwd),
   ])
 
-  const system = appendSystemContext(options.system ?? '', sysCtx)
+  let system = appendSystemContext(options.system ?? '', sysCtx)
+
+  // ── 渐进式披露：skill 一级菜单（实现文档 §1.4）──────────────────────────────
+  // 仅当本次 query 暴露了 Skill 工具时注入（子 agent 无 Skill 工具 → 不浪费 token）。
+  // 菜单会话内稳定 → 进可缓存系统提示前缀。
+  if (tools.some(t => t.name === 'Skill')) {
+    const menu = buildSkillMenu(getCommands(cwd), activeContextWindow())
+    if (menu) system = `${system}\n\n${menu}`
+  }
 
   // <system-reminder>（CLAUDE.md + 日期）每轮为模型调用「新鲜注入」，但【不】持久进对话数组，
   // 否则会逐轮在头部累积、膨胀上下文。取出 reminder 块，对话数组保持干净。
@@ -276,6 +288,7 @@ export async function* query(
         enablePromptCaching: options.enablePromptCaching,
         tools: toolSchemas.length > 0 ? toolSchemas : undefined,
         abortSignal: options.abortSignal,
+        model: options.model,
       })) {
         // 透传给上层（CLI 渲染）
         yield event

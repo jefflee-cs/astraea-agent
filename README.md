@@ -34,6 +34,7 @@ It runs in your terminal as either a **persistent REPL** (multi-turn, React Ink 
 | **Five session modes** | `default` · `orbit` (read-only planning) · `cruise` (auto-accept edits) · `forge` (bypass prompts) · `counsel` (confirm direction first). |
 | **Permission system** | A mode × behavior matrix with hard **red-lines** that can never be bypassed — auto-approve the safe, always gate the dangerous. |
 | **Rich tool suite** | Files, shell (Bash + PowerShell), web (fetch / search / headless browser), LSP, MCP resources, and skills. |
+| **Extensible** | Drop-in **skills** (`SKILL.md`), **MCP** servers (stdio / http / sse), and installable **plugins** that bundle both — see [§4](#4--skills-mcp--plugins). |
 | **Sub-agents** | Spawn worker agents, message peers, and fan out complex work — coordination tools included. |
 | **Vigil scheduling** | Schedule one-off or recurring agent tasks that run headless via a background daemon. |
 | **Memory & compaction** | Persistent file-based memory injection, prompt-cache-aware system prompts, and automatic context compaction. |
@@ -171,21 +172,154 @@ bun run wechat:stop                  # signal the reader to stop at the next che
 
 ---
 
+## 4 · Skills, MCP & Plugins
+
+Astraea has three ways to extend what it can do. They are independent subsystems that converge on the same internal pipelines — a skill from a plugin and a skill you hand-wrote become the *same* object; an MCP server from a plugin and one you added by hand flow through the *same* config merge.
+
+> **Mental model:** the **skill system** owns all skills and the **MCP system** owns all MCP servers. Plugins are just one *supplier* that delivers skills/servers into those systems — exactly equal to dropping a file yourself.
+
+### 4.1 Skills — Markdown operating manuals
+
+A **skill** is a folder containing a `SKILL.md` file. When invoked, its content is injected as instructions for the model to follow. Skills live in:
+
+| Scope | Path | Precedence |
+|-------|------|------------|
+| user | `~/.astraea/skills/<name>/SKILL.md` | **wins** on name clash |
+| project | `<repo>/.astraea/skills/<name>/SKILL.md` | overridden by user |
+
+**SOP — add a skill:**
+
+```bash
+mkdir -p .astraea/skills/code-review
+$EDITOR .astraea/skills/code-review/SKILL.md
+```
+
+```markdown
+---
+description: review a diff for bugs and security issues   # required — the only common field
+when_to_use: when the user asks for a code review         # optional, appended in the menu
+allowed-tools: [Read, Grep, Bash]                          # optional, additive permissions
+argument-hint: "[path]"                                    # optional, shown in the slash picker
+model: claude-opus-4-8                                     # optional, per-invocation model override
+---
+
+# Code Review
+Walk the diff, flag correctness bugs first, then security, then style…
+```
+
+> The folder name **is** the skill name. Only `<name>/SKILL.md` is recognized — a bare `.md` file is skipped.
+
+**SOP — invoke a skill** (two entrances, same result):
+
+| Entrance | How | Gated by |
+|----------|-----|----------|
+| **You** | type `/code-review [args]` in the REPL (autocompletes after `/`) | `user-invocable: false` hides it |
+| **The model** | it picks from a 1-line "skill menu" injected each turn (progressive disclosure) and calls the `Skill` tool itself | `disable-model-invocation: true` hides it |
+
+On invocation, the skill's `allowed-tools` and `model` apply to that turn only.
+
+### 4.2 MCP — external tools via the Model Context Protocol
+
+MCP servers give the model **real callable tools** (read a database, query Sentry, …). They run as isolated processes/connections; their tools appear to the model as `mcp__<server>__<tool>`.
+
+**SOP — add a server** with `astraea mcp add`:
+
+```bash
+# Remote (HTTP) — needs --transport http; second arg is a URL
+astraea mcp add --transport http sentry https://mcp.sentry.dev/mcp
+
+# Remote + static auth header
+astraea mcp add --transport http corridor https://app.corridor.dev/api/mcp \
+  -H "Authorization: Bearer $TOKEN"
+
+# Local (stdio is the default; everything after -- is the subprocess command)
+astraea mcp add filesystem npx -- -y @modelcontextprotocol/server-filesystem /path
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--transport / -t` | `stdio` (local, default) · `http` · `sse` (remote) |
+| `-e KEY=val` | environment variable for a **stdio** subprocess |
+| `-H "Header: val"` | auth header for a **remote** server |
+| `--scope` | `local` (default) · `project` · `user` |
+
+```bash
+astraea mcp list            # show configured servers
+astraea mcp remove sentry   # delete one
+```
+
+Inside the REPL, `/mcp` shows live connection status. Config is stored per scope: project → `.mcp.json` (commit it), user → `~/.astraea/settings.json`, local → `.astraea/settings.local.json`.
+
+> **Restart to apply.** Servers connect at startup; changing config means restarting the session. Remote auth is static headers only in v1 (no OAuth yet).
+
+### 4.3 Plugins — package & distribute skills + MCP
+
+A **plugin** bundles skills and MCP servers into one installable, versioned unit. Distribution follows a *marketplace* model: a plugin always lives on a "shelf" (`marketplace.json`), and `install` only installs shelf items. v1 supports **local directory** marketplaces (offline).
+
+**SOP — make & install a local plugin:**
+
+```
+my-shelf/
+├── .astraea-plugin/marketplace.json     # the shelf: lists plugins
+└── db-tools/                            # the plugin
+    ├── .astraea-plugin/plugin.json      # manifest
+    └── skills/query-db/SKILL.md         # auto-detected; no need to declare it
+```
+
+```jsonc
+// my-shelf/.astraea-plugin/marketplace.json
+{ "name": "my-shelf",
+  "plugins": [ { "name": "db-tools", "source": "./db-tools" } ] }
+```
+
+```jsonc
+// my-shelf/db-tools/.astraea-plugin/plugin.json
+{ "name": "db-tools", "version": "0.3.0",
+  "mcpServers": { "pg": { "type": "http", "url": "https://pg.example/mcp" } } }
+// skills/ is detected by convention — declaring "skills" is optional
+```
+
+```bash
+astraea plugin marketplace add ./my-shelf   # subscribe to the shelf
+astraea plugin install db-tools             # materialize into the versioned cache
+# the plugin's skills join the skill menu; its MCP servers connect on next start
+```
+
+**Lifecycle** (state is separated — files vs. the enabled flag):
+
+```bash
+astraea plugin list                 # installed plugins
+astraea plugin disable db-tools     # flip a boolean — keeps files
+astraea plugin enable  db-tools
+astraea plugin uninstall db-tools   # remove record + cached files
+astraea plugin marketplace list     # subscribed shelves
+```
+
+Inside the REPL, `/plugin` shows installed plugins and shelves. Plugins are stored under `~/.astraea/plugins/` (relocate with `ASTRAEA_PLUGINS_DIR`). When a plugin's skill or server clashes with one you wrote by hand, **yours wins** (`manual > plugin`).
+
+> v1 wires plugin **skills + mcpServers** only. Remote marketplaces (git/npm), auto-update, and other contribution types are planned. **Restart to apply** install/enable changes.
+
+---
+
 ## Architecture at a glance
 
 ```
 src/
 ├── cli.ts / repl.tsx      # entry points — single-shot CLI & Ink REPL
+├── cli/                   # `astraea mcp …` / `astraea plugin …` subcommands
 ├── query.ts               # the agent loop (streaming, tool dispatch, framework rails)
 ├── api/                   # provider clients & streaming
 ├── context/               # system prompt builder, session preamble, memory injection
 │   └── systemPrompt/      #   layered, prompt-cache-aware sections
+├── commands/              # unified command table (built-ins + skills) + skill menu
+├── skills/                # SKILL.md loader, frontmatter, progressive disclosure
 ├── tools/                 # the full tool suite (Bash, File*, Web*, Task*, Vigil*, Wechat*, …)
 ├── services/              # compaction, transcript, eclipse, cron-daemon
 ├── permissions/           # mode × behavior matrix + red-lines
 ├── state/                 # session mode, micro-compact state
 ├── memory/                # persistent file-based memory
-├── mcp/                   # Model Context Protocol clients & instructions
+├── mcp/                   # Model Context Protocol — transports, config, dynamic tool registry
+├── plugins/               # local plugins — manifest, marketplace, materialize, lifecycle
 └── ui/                    # React Ink components
 ```
 

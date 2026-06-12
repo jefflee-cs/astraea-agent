@@ -3,13 +3,16 @@
 
 import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { Box, Text, Static, useApp, useInput, usePaste } from 'ink'
-import TextInput from 'ink-text-input'
+import TextInput from './TextInput'
 import { query } from '../query'
-import { listTools, getInteractiveTools } from '../tools/registry'
+import { listTools, getInteractiveTools, findTool } from '../tools/registry'
+import { findCommand } from '../commands/registry'
+import { initMcp, getMcpStatus } from '../mcp/registry'
+import { initPlugins } from '../plugins/init'
 import { createUserMessage } from '../types/message'
 import type { UserMessage, AssistantMessage } from '../types/message'
 import { WelcomePanel } from './WelcomePanel'
-import { ThinkingIndicator } from './ThinkingIndicator'
+import { StreamStatus } from './ThinkingIndicator'
 import { LoginWizard, formatLoginSuccess } from './LoginWizard'
 import type { LoginResult } from './LoginWizard'
 import { config, updateProviderConfig, saveConfigToEnv } from '../config'
@@ -60,8 +63,9 @@ import { ModeSelector, MODE_OPTIONS } from './ModeSelector'
 import { ConfirmSelector, CONFIRM_CHOICES } from './ConfirmSelector'
 import { onConfirmRequest, resolveConfirm, type ConfirmRequest } from '../tools/BashTool/permissions/confirmBridge'
 import { VigilPanel, VIGIL_ACTIONS } from './VigilPanel'
-import { SlashHint, SLASH_COMMANDS, matchSlashCommands } from './SlashHint'
+import { SlashHint, allSlashCommands, matchSlashCommands } from './SlashHint'
 import { ModeSwitchBanner, ModeInputFrame } from './ModeBanner'
+import { ToolBatch, type ToolCall } from './ToolBatch'
 import { TodoPanel } from './TodoPanel'
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -72,6 +76,7 @@ import { abortWechatRead, WechatReadTool } from '../tools/WechatReadTool'
 const VIGIL_RESULT_DIR = join(homedir(), '.astraea', 'task-results')
 
 const INDIGO = '#6A5ACD'
+const DEEP = '#1A0F40'   // dark navy-purple —— 用户消息底色（与 AstraeaSprite 同款品牌色）
 const VERSION = '0.1.0'
 
 function formatToolArg(name: string, input: Record<string, unknown>): string {
@@ -136,9 +141,29 @@ function formatGoalStatus(): string {
 
 interface HistoryEntry {
   id: string
-  role: 'welcome' | 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'mode_banner'
+  // 路径 A 重构（Stage 1）：tool_use/tool_result 两类合并为一条 'tools' 批（calls 承载，
+  // 逐调用配对 + 同类折叠由 <ToolBatch> 渲染）。文本/banner 角色保持不变。
+  role: 'welcome' | 'user' | 'assistant' | 'mode_banner' | 'skill_banner' | 'tools'
   text: string
-  lines?: string[]  // multi-line result display (tool_result only)
+  lines?: string[]       // 多行结果显示（历史遗留字段，'tools' 不用）
+  calls?: ToolCall[]     // 'tools' 行专用：一个已落盘的工具批
+}
+
+// 工具结果 → 展示行：优先工具自带 renderResult，否则截断预览。live 流与 /resume 复用同一逻辑。
+function buildResultLines(
+  name: string,
+  input: Record<string, unknown>,
+  output: string,
+  isError: boolean,
+): string[] {
+  const tool = listTools().find(t => t.name === name)
+  const rendered = tool?.renderResult?.(input, output, isError) ?? null
+  if (rendered) {
+    return isError ? [`[error] ${rendered[0]}`, ...rendered.slice(1)] : rendered
+  }
+  const status = isError ? 'error' : 'ok'
+  const preview = output.slice(0, 300)
+  return [`[${status}] ${preview}${output.length > 300 ? '…' : ''}`]
 }
 
 // /resume：把恢复的对话消息转成可滚动回看的 history 条目（仅展示 user/assistant 文本）。
@@ -147,6 +172,20 @@ function rebuildHistoryEntries(
   nextId: () => string,
 ): HistoryEntry[] {
   const out: HistoryEntry[] = []
+  // 先把所有 tool_result 按 id 建索引，供 assistant 的 tool_use 回填。
+  const resultById = new Map<string, { output: string; isError: boolean }>()
+  for (const m of msgs) {
+    if (m.role === 'user' && Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (b.type === 'tool_result') {
+          const output = typeof b.content === 'string'
+            ? b.content
+            : b.content.map(x => (x as { text: string }).text).join('')
+          resultById.set(b.tool_use_id, { output, isError: !!b.is_error })
+        }
+      }
+    }
+  }
   for (const m of msgs) {
     if (m.role === 'user') {
       const raw = typeof m.content === 'string'
@@ -159,8 +198,32 @@ function rebuildHistoryEntries(
       const clean = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
       if (clean) out.push({ id: nextId(), role: 'user', text: clean })
     } else {
-      const text = m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('').trim()
-      if (text) out.push({ id: nextId(), role: 'assistant', text })
+      // assistant：按 block 顺序逐条还原——text 落 assistant 行，连续 tool_use 攒成一条 tools 批。
+      let calls: ToolCall[] = []
+      const flushCalls = () => {
+        if (calls.length) { out.push({ id: nextId(), role: 'tools', text: '', calls }); calls = [] }
+      }
+      for (const b of m.content) {
+        if (b.type === 'text') {
+          flushCalls()
+          const t = b.text.trim()
+          if (t) out.push({ id: nextId(), role: 'assistant', text: t })
+        } else if (b.type === 'tool_use') {
+          if (b.name === 'TodoWrite') continue
+          const r = resultById.get(b.id)
+          const lines = r
+            ? buildResultLines(b.name, b.input, r.output, r.isError)
+            : ['(no result)']
+          calls.push({
+            toolUseId: b.id,
+            name: b.name,
+            argText: formatToolArg(b.name, b.input),
+            status: r?.isError ? 'error' : 'done',
+            resultLines: lines,
+          })
+        }
+      }
+      flushCalls()
     }
   }
   return out
@@ -178,6 +241,15 @@ export function App() {
   const [streamingText, setStreamingText] = useState('')
   const [activeTool, setActiveTool] = useState<string | null>(null)
   const [liveOutput, setLiveOutput] = useState<string>('')
+  // 在途工具批（路径 A 重构）：liveToolsRef 是 async 流循环里同步读写的真相源，
+  // liveTools 仅用于触发 live frame 重渲染。批结束（文本恢复 / done / abort）时落盘成 'tools' 行。
+  const liveToolsRef = useRef<ToolCall[]>([])
+  const [liveTools, setLiveTools] = useState<ToolCall[]>([])
+  // 常驻状态行（StreamStatus）的数据：本次流式起始时刻 + 实时输出 token 估算。
+  // runOutCharsRef 累积本次运行的输出字符数；token ≈ chars/4。
+  const [streamStart, setStreamStart] = useState<number | null>(null)
+  const runOutCharsRef = useRef(0)
+  const [liveTokens, setLiveTokens] = useState(0)
   const [inputValue, setInputValue] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [isCompacting, setIsCompacting] = useState(false)  // 压缩进行中
@@ -220,6 +292,18 @@ export function App() {
   const transcriptRef = useRef<TranscriptWriter | null>(null)
   const loggedLenRef = useRef(0)
   const entryIdRef = useRef(0)
+  // 写 liveToolsRef（同步真相）+ liveTools（触发重渲染）。
+  const syncLiveTools = useCallback((next: ToolCall[]) => {
+    liveToolsRef.current = next
+    setLiveTools(next)
+  }, [])
+  // 把当前在途批落盘成一条 'tools' 行并清空。空批为 no-op。
+  const commitLiveTools = useCallback(() => {
+    if (liveToolsRef.current.length === 0) return
+    const calls = liveToolsRef.current
+    setHistory(prev => [...prev, { id: String(entryIdRef.current++), role: 'tools', text: '', calls }])
+    syncLiveTools([])
+  }, [syncLiveTools])
   const commandHistoryRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
   const draftInputRef = useRef('')
@@ -246,6 +330,23 @@ export function App() {
   // Load real system prompt on mount and rebuild whenever session mode changes
   // Also start UDS server for cross-process IPC (only on mount)
   useEffect(() => { startUDSServer() }, [])
+
+  // MCP 启动期连接（实现文档 §1.7）：连上后工具进 getMcpTools()，下一轮 query 即可见。
+  // 失败容忍（registry 记状态供 /mcp 面板展示）；不阻塞 UI。
+  useEffect(() => {
+    initPlugins()  // 先注册插件 skill/mcp 吸管，再连 MCP（含插件 server）
+    void initMcp().then(() => {
+      const failed = getMcpStatus().filter(s => s.state === 'failed')
+      const ok = getMcpStatus().filter(s => s.state === 'connected')
+      if (ok.length || failed.length) {
+        setHistory(prev => [...prev, {
+          id: String(entryIdRef.current++),
+          role: 'assistant',
+          text: `◎ MCP: ${ok.length} connected${ok.length ? ` (${ok.reduce((n, s) => n + s.toolCount, 0)} tools)` : ''}${failed.length ? `, ${failed.length} failed` : ''}.`,
+        }])
+      }
+    })
+  }, [])
 
   // transcript：挂载时开新会话（或 --resume 恢复）+ 调度 housekeeping（设计文档 §10）。
   useEffect(() => {
@@ -281,6 +382,16 @@ export function App() {
 
   // 输入变化时把 slash 选择器高亮重置到第 0 项（导航只改 slashIndex，不会触发此处）。
   useEffect(() => { setSlashIndex(0); slashIndexRef.current = 0 }, [inputValue])
+
+  // 流式开始的上升沿：重置常驻状态行的计时与 token 计数。覆盖所有流式入口
+  // （主对话 / WechatRead / 其它次要查询循环），无需逐处埋点。
+  useEffect(() => {
+    if (isStreaming) {
+      setStreamStart(Date.now())
+      runOutCharsRef.current = 0
+      setLiveTokens(0)
+    }
+  }, [isStreaming])
 
   useEffect(() => {
     return () => { if (escPendingTimerRef.current) clearTimeout(escPendingTimerRef.current) }
@@ -407,7 +518,15 @@ export function App() {
   }, [])
 
   const runConversation = useCallback(
-    async (promptText: string, displayText?: string) => {
+    async (
+      promptText: string,
+      displayText?: string,
+      // skill 斜杠入口（路径 A）的 per-query 线程化（实现文档 §1.6）：
+      //   model     — skill frontmatter 的模型覆盖，仅作用于这一次 query
+      //   extraTools — skill allowed-tools 的累加授权（把交互集之外的工具补进本次 query）
+      //   skillName — 经斜杠入口命中的 skill 名，命中后在 user 行下补一行 "skill /<name> loaded." 提示
+      runOpts?: { model?: string; extraTools?: import('../tools/Tool').Tool[]; skillName?: string },
+    ) => {
       const controller = new AbortController()
       abortControllerRef.current = controller
 
@@ -418,10 +537,14 @@ export function App() {
       setStreamingText('')
       setActiveTool(null)
       setLiveOutput('')
+      syncLiveTools([])
 
       setHistory(prev => [
         ...prev,
         { id: String(entryIdRef.current++), role: 'user', text: displayText ?? promptText },
+        ...(runOpts?.skillName
+          ? [{ id: String(entryIdRef.current++), role: 'skill_banner' as const, text: runOpts.skillName }]
+          : []),
       ])
 
       const userMsg = createUserMessage(promptText)
@@ -444,16 +567,29 @@ export function App() {
       }
 
       try {
-        for await (const event of query(messages, getInteractiveTools(), {
+        const queryTools = runOpts?.extraTools?.length
+          ? [...getInteractiveTools(), ...runOpts.extraTools.filter(
+              t => !getInteractiveTools().some(b => b.name === t.name))]
+          : getInteractiveTools()
+        for await (const event of query(messages, queryTools, {
           system: systemPrompt!,
-          maxTurns: 20,
+          // 探索类任务（连续 Grep/Read）很容易跑十几二十轮。20 太低会把任务腰斩，
+          // 表现为"运行到一半就结束"。抬到 100 作为防失控的硬上限，正常任务远够用；
+          // 真撞到上限会经 max_turns_reached 提示用户继续，而非静默 return。
+          maxTurns: 100,
           enablePromptCaching: true,
           abortSignal: controller.signal,
           autocompact: true,  // 仅主对话开启压缩 + token 计数（设计文档 §3/§6）
+          model: runOpts?.model,  // skill frontmatter 模型覆盖（per-query）
         })) {
           switch (event.type) {
             case 'text':
+              // 工具批结束、叙述恢复 → 先把在途批落盘，保证时序：…文本→工具批→文本…
+              if (liveToolsRef.current.length > 0) commitLiveTools()
               accumulated += event.text
+              // 常驻状态行的实时 token 估算（跨轮累积，token ≈ chars/4）。
+              runOutCharsRef.current += event.text.length
+              setLiveTokens(Math.ceil(runOutCharsRef.current / 4))
               if (event.text.trim()) anyVisibleOutput = true
               setStreamingText(accumulated)
               break
@@ -461,11 +597,14 @@ export function App() {
             case 'tool_use': {
               if (event.name === 'TodoWrite') break
               anyVisibleOutput = true
+              // 叙述紧贴其工具调用：先把累积文本落盘，再把这次调用推进在途批。
+              // live frame 由「文本」切到「工具行」，不会塌缩为 0 行 → 规避 done-bug 越界擦除。
+              flushAssistant()
               setActiveTool(event.name)
               const argPreview = formatToolArg(event.name, event.input)
-              setHistory(prev => [
-                ...prev,
-                { id: String(entryIdRef.current++), role: 'tool_use', text: `${event.name}(${argPreview})` },
+              syncLiveTools([
+                ...liveToolsRef.current,
+                { toolUseId: event.id, name: event.name, argText: argPreview, status: 'running' },
               ])
               break
             }
@@ -479,20 +618,20 @@ export function App() {
               setLiveOutput('')
               setActiveTool(null)
               if (event.name === 'TodoWrite') break
-              const tool = listTools().find(t => t.name === event.name)
-              const renderedLines = tool?.renderResult?.(event.input, event.output, event.isError) ?? null
-              let lines: string[]
-              if (renderedLines) {
-                lines = event.isError ? [`[error] ${renderedLines[0]}`, ...renderedLines.slice(1)] : renderedLines
-              } else {
-                const status = event.isError ? 'error' : 'ok'
-                const preview = event.output.slice(0, 300)
-                lines = [`[${status}] ${preview}${event.output.length > 300 ? '…' : ''}`]
-              }
+              const lines = buildResultLines(event.name, event.input, event.output, event.isError)
+
+              // 结果按 id 回填到在途批对应调用（逐调用配对的核心）。
+              syncLiveTools(liveToolsRef.current.map(c =>
+                c.toolUseId === event.id
+                  ? { ...c, status: event.isError ? 'error' : 'done', resultLines: lines }
+                  : c,
+              ))
 
               const currentSingletonMode = getMode()
               setSessionModeState(prev => {
                 if (prev !== currentSingletonMode) {
+                  // 模式 banner 必须排在工具批之后 → 先把在途批落盘再插 banner。
+                  commitLiveTools()
                   setHistory(h => [
                     ...h,
                     { id: String(entryIdRef.current++), role: 'mode_banner' as const, text: currentSingletonMode },
@@ -501,11 +640,6 @@ export function App() {
                 }
                 return prev
               })
-
-              setHistory(prev => [
-                ...prev,
-                { id: String(entryIdRef.current++), role: 'tool_result', text: lines[0]!, lines },
-              ])
               break
             }
 
@@ -597,6 +731,18 @@ export function App() {
               break
             }
 
+            case 'max_turns_reached': {
+              // 撞到硬上限：之前会跟着 done 静默收尾，用户只看到任务半途而废、不知为何。
+              // 这里显式落一行提示，并保留已产出的上下文——直接回车/补一句即可续跑。
+              flushAssistant()
+              setHistory(prev => [...prev, {
+                id: String(entryIdRef.current++),
+                role: 'assistant',
+                text: `⚠ 已达单轮上限 ${event.maxTurns} 轮，任务可能未完成。直接回车或补一句"继续"即可接着跑。`,
+              }])
+              break
+            }
+
             case 'done': {
               conversationRef.current = event.messages
               // transcript：增量写本轮新产生的消息（设计文档 §10 逐条 append）
@@ -608,11 +754,13 @@ export function App() {
                   loggedLenRef.current = event.messages.length
                 }
               }
-              // ESC 中止：UI 已在 ESC 处理器里更新（显示了 [cancelled]），这里只清理流式状态
+              // ESC 中止：UI 已在 ESC 处理器里更新（显示了 [cancelled]），这里只清理流式状态。
+              // 已跑完的工具调用落盘保留，避免中止时丢掉用户已看到的结果。
               if (controller.signal.aborted) {
                 accumulated = ''
                 setStreamingText('')
                 setIsStreaming(false)
+                commitLiveTools()
                 break
               }
               // ── 修复「回复闪一下就消失」──────────────────────────────────────
@@ -622,10 +770,12 @@ export function App() {
               // 解法：分两帧——先收起 live frame，再到下一帧才把回复 append 进 Static。
               const finalText = accumulated
               accumulated = ''
-              setStreamingText('')      // 帧 A：live frame 干净收起，Static 不变，无越界
+              setStreamingText('')      // 帧 A：live frame 干净收起（含在途工具批），Static 不变，无越界
               setIsStreaming(false)
               setGoalTick(t => t + 1)
               setTimeout(() => {        // 帧 B：live frame 已为 0，单纯向 Static 追加，安全
+                // 先落盘以工具结尾的在途批（此时 finalText 为空），再落最终文本 → 顺序正确。
+                commitLiveTools()
                 if (finalText.trim()) {
                   setHistory(prev => [
                     ...prev,
@@ -648,13 +798,15 @@ export function App() {
           }
         }
       } catch (err) {
-        // AbortError = ESC 中止，UI 已在 ESC 处理器里更新，这里静默清理
+        // AbortError = ESC 中止，UI 已在 ESC 处理器里更新，这里静默清理（保留已跑完的工具批）
         if (err instanceof Error && err.name === 'AbortError') {
           setStreamingText('')
           setActiveTool(null)
           setLiveOutput('')
+          commitLiveTools()
         } else {
           const errMsg = err instanceof Error ? err.message : String(err)
+          commitLiveTools()   // 报错前已跑完的工具批落盘，便于定位失败上下文
           setHistory(prev => [
             ...prev,
             { id: String(entryIdRef.current++), role: 'assistant', text: `[Error: ${errMsg}]` },
@@ -723,7 +875,7 @@ export function App() {
       // 列表打开（/ 开头、无空格、有匹配）时，按高亮项的 enterAction 派发：
       //   complete → 补全 "/goal " 等待输参；execute/panel → 用全名重入正常路由。
       if (trimmed.startsWith('/') && !trimmed.includes(' ')) {
-        const matches = SLASH_COMMANDS.filter(c => c.name.startsWith(trimmed))
+        const matches = allSlashCommands().filter(c => c.name.startsWith(trimmed))
         if (matches.length > 0) {
           const cmd = matches[Math.min(slashIndexRef.current, matches.length - 1)]!
           if (cmd.enterAction === 'complete') {
@@ -1147,6 +1299,39 @@ export function App() {
         return
       }
 
+      // ── Skill 斜杠入口（路径 A，实现文档 §1.2/§1.6）──────────────────────────
+      // /<name> [args] 命中 prompt 命令（= skill）且 user-invocable → 读全文注入对话，
+      // 并把 skill 的 model / allowed-tools 经 per-query 线程化作用于本次 query。
+      // 内置命令是 local/local-jsx，不会落到这里（上方已各自精确路由）。
+      if (trimmed.startsWith('/')) {
+        const m = trimmed.match(/^\/(\S+)(?:\s+([\s\S]*))?$/)
+        if (m) {
+          const cmd = findCommand(m[1]!)
+          // prompt 命令（= skill）：读全文注入 + per-query model/allowedTools 线程化
+          if (cmd && cmd.type === 'prompt' && cmd.userInvocable) {
+            const skillArgs = m[2]?.trim() || undefined
+            const blocks = await cmd.getPrompt(skillArgs)
+            const content = blocks.map(b => b.text).join('\n')
+            const extraTools = (cmd.allowedTools ?? [])
+              .map(name => findTool(name))
+              .filter((t): t is import('../tools/Tool').Tool => !!t)
+            await runConversation(content, trimmed, { model: cmd.model, extraTools, skillName: cmd.name })
+            return
+          }
+          // local 命令（表内本地逻辑，如 /mcp）：跑 run() 显示文本，零 token。
+          // 注：/model //help 等内置仍由上方既有 handler 抢先 return，不会落到这里。
+          if (cmd && cmd.type === 'local' && cmd.userInvocable) {
+            setInputValue('')
+            historyIndexRef.current = -1
+            const res = await cmd.run(m[2]?.trim() || undefined)
+            if (res.type === 'text') {
+              setHistory(prev => [...prev, { id: String(entryIdRef.current++), role: 'assistant', text: res.value }])
+            }
+            return
+          }
+        }
+      }
+
       // 展开粘贴占位符 → 真实内容喂给模型；history 仍显示占位符（trimmed）
       await runConversation(expandPastes(trimmed), trimmed)
     },
@@ -1411,6 +1596,7 @@ export function App() {
         setStreamingText('')
         setActiveTool(null)
         setLiveOutput('')
+        commitLiveTools()  // 已跑完的工具批先落盘，排在 _[cancelled]_ 之前（顺序正确）
         setHistory(prev => [
           ...prev,
           { id: String(entryIdRef.current++), role: 'assistant', text: '_[cancelled]_' },
@@ -1558,37 +1744,34 @@ export function App() {
               <ModeSwitchBanner key={entry.id} mode={entry.text as SessionMode} />
             )
           }
-          if (entry.role === 'tool_use') {
+          if (entry.role === 'skill_banner') {
             return (
-              <Box key={entry.id}>
-                <Text color="yellow">⏺  {entry.text}</Text>
+              <Box key={entry.id} marginBottom={1}>
+                <Text color={INDIGO}>✦ skill </Text>
+                <Text bold color={INDIGO}>/{entry.text}</Text>
+                <Text color={INDIGO} dimColor> loaded.</Text>
               </Box>
             )
           }
-          if (entry.role === 'tool_result') {
-            const displayLines = entry.lines ?? [entry.text]
+          if (entry.role === 'tools') {
+            // 已落盘的工具批：逐调用配对 + 同类折叠由 <ToolBatch> 统一渲染。
+            return <ToolBatch key={entry.id} calls={entry.calls ?? []} />
+          }
+          if (entry.role === 'user') {
+            // 用户消息（含斜杠命令）整块铺 DEEP 深蓝底 + 横向内边距 → 与 Astraea 回复明显区分。
+            // 对齐 CC 的 userMessageBackground；底色 hug 内容（最宽行决定块宽）。
             return (
-              <Box key={entry.id} flexDirection="column" marginLeft={4} marginBottom={1}>
-                <Text color="gray" dimColor>⎿  {displayLines[0]}</Text>
-                {displayLines.slice(1).map((line, i) => {
-                  const isAdded = line.trimStart().startsWith('+')
-                  const isRemoved = line.trimStart().startsWith('-')
-                  const color = isAdded ? 'green' : isRemoved ? 'red' : 'gray'
-                  return (
-                    <Text key={i} color={color} dimColor={!isAdded && !isRemoved}>
-                      {'   '}{line}
-                    </Text>
-                  )
-                })}
+              <Box key={entry.id} flexDirection="column" marginBottom={1} backgroundColor={DEEP} paddingX={1}>
+                <Text bold color="green">❯ You</Text>
+                <Text>{entry.text}</Text>
               </Box>
             )
           }
+          // 其余（assistant 及以 assistant 角色落盘的系统提示）走 markdown 渲染。
           return (
             <Box key={entry.id} flexDirection="column" marginBottom={1}>
-              <Text bold color={entry.role === 'user' ? 'green' : INDIGO}>
-                {entry.role === 'user' ? 'You' : 'Astraea'}
-              </Text>
-              <Text>{entry.role === 'assistant' ? renderMarkdown(entry.text) : entry.text}</Text>
+              <Text bold color={INDIGO}>✦ Astraea</Text>
+              <Text>{renderMarkdown(entry.text)}</Text>
             </Box>
           )
         }}
@@ -1596,13 +1779,12 @@ export function App() {
 
       {isStreaming && (
         <Box flexDirection="column" marginBottom={1}>
-          <Text bold color={INDIGO}>Astraea</Text>
-          {streamingText ? (
-            <Text>{renderMarkdown(streamingText)}</Text>
-          ) : (
-            <ThinkingIndicator />
-          )}
-          {activeTool && (
+          <Text bold color={INDIGO}>✦ Astraea</Text>
+          {streamingText && <Text>{renderMarkdown(streamingText)}</Text>}
+          {/* 在途工具批：逐调用配对 + 同类折叠，liveOutput 挂在 running 调用下。 */}
+          {liveTools.length > 0 && <ToolBatch calls={liveTools} liveOutput={liveOutput} />}
+          {/* 次要查询循环（如 WechatRead）只设 activeTool、不入 liveTools → 退回单行 spinner。 */}
+          {liveTools.length === 0 && activeTool && (
             <Box flexDirection="column">
               <Text color="yellow">⏺  {activeTool}…</Text>
               {liveOutput && (
@@ -1614,6 +1796,9 @@ export function App() {
               )}
             </Box>
           )}
+          {/* 常驻状态行：流式期间一直显示（轮换短语 + 实时秒数 + token + esc 提示），
+              解决"跑到一半停住、不知是否还在运行"的问题。置于 live frame 底部。 */}
+          <StreamStatus startTime={streamStart} tokens={liveTokens} />
         </Box>
       )}
 

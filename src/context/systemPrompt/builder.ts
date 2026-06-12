@@ -29,6 +29,7 @@ import { systemPromptSection, uncachedSection, resolveSections } from './section
 import { computeEnvInfo }             from './envInfo'
 import { loadMemoryInstructions }     from '../../memory/inject'
 import { getMcpInstructions }         from '../../mcp/instructions'
+import { getMcpInstructionBlocks }    from '../../mcp/registry'
 import type { MCPServerConnection }   from '../../mcp/types'
 import { TOKEN_BUDGET_HINT_TEXT }     from '../../utils/token-budget'
 import type { SessionMode }           from '../../state/sessionMode'
@@ -45,7 +46,7 @@ export interface SystemPromptOptions {
 }
 
 export async function getSystemPrompt(options: SystemPromptOptions): Promise<string> {
-  const { modelId, enabledTools, language, mcpClients, mode = 'default' } = options
+  const { modelId, enabledTools, language, mode = 'default' } = options
   const cwd = options.cwd ?? process.cwd()
 
   const dynamicSections = [
@@ -59,18 +60,20 @@ export async function getSystemPrompt(options: SystemPromptOptions): Promise<str
     // 不含 MEMORY.md 索引/记忆正文（索引走 reminder 块，召回正文走用户消息尾部）。
     // 会话级缓存（/clear 失效）。指令静态，永远非空。
     systemPromptSection('memory', () => loadMemoryInstructions(cwd)),
-    // MCP 插件说明：每轮强制重算，因为服务器可在会话中途上下线
-    // DANGEROUS_UNCACHED — 跳过 prompt cache，每轮完整传输
-    ...(mcpClients
-      ? [uncachedSection(
-          'mcp_instructions',
-          () => {
-            const text = getMcpInstructions(mcpClients)
-            return text ? `# MCP Servers\n${text}` : null
-          },
-          'MCP servers can connect/disconnect between turns; stale cache would expose outdated tool descriptions',
-        )]
-      : []),
+    // MCP 服务器说明：从会话级 MCP 注册表读已连接 server 的 instructions。
+    // DANGEROUS_UNCACHED — 跳过 prompt cache（server 可在会话中途上下线/重连）。
+    uncachedSection(
+      'mcp_instructions',
+      () => {
+        // registry 的 instruction 块映射成 ConnectedMCPServer 形态，复用既有截断格式化。
+        const clients: MCPServerConnection[] = getMcpInstructionBlocks().map(b => ({
+          type: 'connected' as const, name: b.name, instructions: b.instructions, tools: [],
+        }))
+        const text = getMcpInstructions(clients)
+        return text ? `# MCP Servers\n${text}` : null
+      },
+      'MCP servers can connect/disconnect between turns; stale cache would expose outdated tool descriptions',
+    ),
   ]
 
   const resolvedDynamic = await resolveSections(dynamicSections)

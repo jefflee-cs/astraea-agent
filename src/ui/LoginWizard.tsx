@@ -1,7 +1,7 @@
 // /login 交互式配置向导 — 分步选择 provider → model → API Key
 import React, { useState } from 'react'
 import { Box, Text, useInput } from 'ink'
-import TextInput from 'ink-text-input'
+import TextInput from './TextInput'
 import type { Provider } from '../config'
 
 const INDIGO = '#6A5ACD'
