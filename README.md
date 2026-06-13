@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./assets/banner.svg" alt="Astraea" width="640"/>
+<img src="./assets/banner.svg" alt="Astraea" width="800"/>
 
 ### An agent of order and precision
 
