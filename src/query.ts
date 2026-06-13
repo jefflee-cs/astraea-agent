@@ -15,6 +15,14 @@ import {
 } from './types/message'
 import type { Tool, ToolSchema, ToolContext } from './tools/Tool'
 import { findTool } from './tools/registry'
+import {
+  initPhoenix,
+  createTrace,
+  endTrace,
+  recordLLMObservation,
+  recordToolObservation,
+  type PhoenixTrace,
+} from './observability/phoenix'
 import { getMode } from './state/sessionMode'
 import { ask } from './tools/AskUserQuestionTool/bridge'
 import { yieldMissingToolResultBlocks } from './utils/messages'
@@ -115,6 +123,33 @@ export async function* query(
   initialMessages: (UserMessage | AssistantMessage)[],
   tools: Tool[],
   options: QueryOptions = {},
+): AsyncGenerator<QueryEvent> {
+  // ── Phoenix 可观测性（路线 B）─────────────────────────────────────────────
+  // 每个 query() 调用 = 用户一个 turn = 一个 AGENT 根 trace。initPhoenix 幂等，
+  // 覆盖所有入口（CLI/REPL/headless/子 agent）；未启用或未装依赖时全 no-op。
+  // 把根 trace 句柄穿线传给 runQuery，再由它注入 ToolContext 与各调用点。
+  await initPhoenix()
+  const phoenixTrace = createTrace({
+    sessionId: options.agentId ?? 'default',
+    input: latestUserText(initialMessages),
+  })
+  let phoenixStatus: 'error' | undefined
+  try {
+    yield* runQuery(initialMessages, tools, options, phoenixTrace)
+  } catch (e) {
+    phoenixStatus = 'error'
+    throw e
+  } finally {
+    // 无论正常 done / return / 抛错 / 被上层中断，都在此收口关根 span（单点收尾）
+    endTrace(phoenixTrace, undefined, phoenixStatus)
+  }
+}
+
+async function* runQuery(
+  initialMessages: (UserMessage | AssistantMessage)[],
+  tools: Tool[],
+  options: QueryOptions = {},
+  phoenixTrace: PhoenixTrace | null = null,
 ): AsyncGenerator<QueryEvent> {
   const maxTurns = options.maxTurns ?? 50
   // 当 /goal 激活时，正常的 maxTurns 会过早截断目标循环。目标循环改用更高的
@@ -282,8 +317,14 @@ export async function* query(
     // assistantMessage 在流结束前先设为 null，用于错误恢复
     let assistantMessage: AssistantMessage | null = null
 
+    // Phoenix LLM span 计时：startTime=请求前；completionStartTime=首个内容事件（TTFT）；usage 在 message_stop 落定
+    const llmStartTime = new Date()
+    let llmFirstTokenAt: Date | undefined
+    let llmUsage: { input_tokens: number; output_tokens: number } = { input_tokens: 0, output_tokens: 0 }
+    const llmInputSnapshot = projectForSend(messages)
+
     try {
-      for await (const event of streamMessage([reminderBlock, ...projectForSend(messages), ...(relevantTail ? [relevantTail] : [])], {
+      for await (const event of streamMessage([reminderBlock, ...llmInputSnapshot, ...(relevantTail ? [relevantTail] : [])], {
         system,
         enablePromptCaching: options.enablePromptCaching,
         tools: toolSchemas.length > 0 ? toolSchemas : undefined,
@@ -292,6 +333,11 @@ export async function* query(
       })) {
         // 透传给上层（CLI 渲染）
         yield event
+
+        // TTFT：记录首个内容事件时刻
+        if (!llmFirstTokenAt && (event.type === 'text' || event.type === 'tool_use')) {
+          llmFirstTokenAt = new Date()
+        }
 
         // 同时收集内容，用于构建 AssistantMessage
         if (event.type === 'text') {
@@ -315,6 +361,7 @@ export async function* query(
         } else if (event.type === 'message_stop') {
           turnOutputTokens = event.usage.output_tokens
           stopReason = event.stopReason
+          llmUsage = event.usage
           // 触发用聚合 input_tokens（仅主对话）：记最近一次响应的真值，供下轮阈值检查。
           if (compactionEnabled) {
             recordInputTokens(event.usage.input_tokens)
@@ -384,6 +431,18 @@ export async function* query(
       role: 'assistant',
       content: contentBlocks,
     }
+
+    // ── 2·Phoenix：记录本次 LLM 调用为一个 LLM span（挂在根 trace 下）──────────
+    // 仅成功完流才到这里（中止/溢出在上面的 catch 已 return/continue，不误记）。
+    recordLLMObservation(phoenixTrace, {
+      input: llmInputSnapshot,
+      output: contentBlocks,
+      usage: llmUsage,
+      model: options.model,
+      startTime: llmStartTime,
+      endTime: new Date(),
+      completionStartTime: llmFirstTokenAt,
+    })
 
     // ── 2a. 更新预算追踪器并检查是否达到停止条件 ──────────────────────────
     tracker = recordTurnTokens(tracker, turnOutputTokens)
@@ -527,6 +586,7 @@ export async function* query(
       agentId: options.agentId,
       abortSignal: options.abortSignal,
       isInteractive: options.isInteractive ?? true, // query() 是交互式 REPL 引擎，默认 true
+      phoenixTrace, // 穿线：让 spawn 子 query 的工具（如 AgentTool）能把子 trace 挂在主 trace 下
     }
 
     // 分流式 vs 普通工具
@@ -580,8 +640,18 @@ export async function* query(
             isError: true,
           }
         }
+        const __phxStart = new Date()
         try {
           const result = await tool.call(toolUse.input, ctx)
+          // Phoenix：记录这次工具执行为 TOOL span（input/output 已在 service 内脱敏）
+          recordToolObservation(phoenixTrace, {
+            toolName: tool.name,
+            toolUseId: toolUse.id,
+            input: toolUse.input,
+            output: result.output,
+            isError: result.isError ?? false,
+            startTime: __phxStart,
+          })
           // 用户已完成方向确认 → 紧接着问"是否现在开始执行"（counsel 第二道闸）
           if (tool.name === 'AskUserQuestion' && !result.isError) {
             counselConsulted = true
@@ -597,6 +667,14 @@ export async function* query(
           }
           return { toolUse, output: result.output, isError: result.isError ?? false }
         } catch (err: unknown) {
+          recordToolObservation(phoenixTrace, {
+            toolName: tool.name,
+            toolUseId: toolUse.id,
+            input: toolUse.input,
+            output: `Tool execution error: ${String(err)}`,
+            isError: true,
+            startTime: __phxStart,
+          })
           return { toolUse, output: `Tool execution error: ${String(err)}`, isError: true }
         }
       }
@@ -639,6 +717,7 @@ export async function* query(
         })
         continue
       }
+      const __phxStreamStart = new Date()
       try {
         const gen = tool.callStream!(toolUse.input, ctx)
         let next: IteratorResult<string, import('./tools/Tool.js').ToolCallResult>
@@ -654,6 +733,15 @@ export async function* query(
         output = `Tool execution error: ${String(err)}`
         isError = true
       }
+      // Phoenix：流式工具同样记一个 TOOL span
+      recordToolObservation(phoenixTrace, {
+        toolName: tool.name,
+        toolUseId: toolUse.id,
+        input: toolUse.input,
+        output,
+        isError,
+        startTime: __phxStreamStart,
+      })
       streamingResults.push({ toolUse, output, isError })
     }
 

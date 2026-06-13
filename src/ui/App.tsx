@@ -2,7 +2,7 @@
 // 参考: claude-code-main/src/screens/REPL.tsx + components/App.tsx
 
 import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Box, Text, Static, useApp, useInput, usePaste } from 'ink'
+import { Box, Text, Static, useApp, useInput, usePaste, useStdout } from 'ink'
 import TextInput from './TextInput'
 import { query } from '../query'
 import { listTools, getInteractiveTools, findTool } from '../tools/registry'
@@ -12,6 +12,7 @@ import { initPlugins } from '../plugins/init'
 import { createUserMessage } from '../types/message'
 import type { UserMessage, AssistantMessage } from '../types/message'
 import { WelcomePanel } from './WelcomePanel'
+import { AstraeaIntro } from './AstraeaIntro'
 import { StreamStatus } from './ThinkingIndicator'
 import { LoginWizard, formatLoginSuccess } from './LoginWizard'
 import type { LoginResult } from './LoginWizard'
@@ -234,10 +235,29 @@ function rebuildHistoryEntries(
 export function App() {
   const { exit } = useApp()
 
+  // 启动动画：普通交互启动先播一次 AstraeaIntro（左→右银色扫光），结束后才把 welcome
+  // 提交进 <Static>。--resume 跳过动画（下方 effect 会重建历史，含 welcome）。
+  const isResumeLaunch = process.argv.slice(2).includes('--resume')
+  const [booting, setBooting] = useState(!isResumeLaunch)
+
   // history[0] = welcome panel (never changes); rest = conversation entries
-  const [history, setHistory] = useState<HistoryEntry[]>([
-    { id: 'welcome', role: 'welcome', text: '' },
-  ])
+  // booting 期间 history 为空 → Static 不渲染任何东西，intro 独占顶部。
+  const [history, setHistory] = useState<HistoryEntry[]>(
+    isResumeLaunch ? [{ id: 'welcome', role: 'welcome', text: '' }] : [],
+  )
+
+  // intro 播放结束（或被按键跳过）→ 收起 live intro，再把 welcome 落进 Static。
+  // 分两帧：先 setBooting(false) 让 live frame 归零，下一帧再追加 Static，规避越界擦除。
+  const handleBootDone = useCallback(() => {
+    setBooting(false)
+    setTimeout(() => {
+      setHistory(prev =>
+        prev.some(e => e.id === 'welcome')
+          ? prev
+          : [{ id: 'welcome', role: 'welcome', text: '' }, ...prev],
+      )
+    }, 0)
+  }, [])
   const [streamingText, setStreamingText] = useState('')
   const [activeTool, setActiveTool] = useState<string | null>(null)
   const [liveOutput, setLiveOutput] = useState<string>('')
@@ -253,6 +273,9 @@ export function App() {
   const [inputValue, setInputValue] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [isCompacting, setIsCompacting] = useState(false)  // 压缩进行中
+  // 终端行数 —— 给"进行中"的流式预览封顶：实时帧（非 Static）一旦高过屏幕，
+  // Ink 重绘时无法擦除滚出可视区的旧行，页脚（agents/tasks/输入框）会残留幽灵副本。
+  const { stdout } = useStdout()
   const [compactChars, setCompactChars] = useState(0)      // 已生成摘要字符数 → 驱动进度条
   // 粘贴折叠（像 Claude Code）：大段粘贴在输入框里只显示占位符 [Pasted text #N …]，
   // 真实内容存在 ref map 里，提交时展开喂给模型。
@@ -1777,10 +1800,22 @@ export function App() {
         }}
       </Static>
 
+      {/* 启动动画 —— 仅 booting 期间在 live 区独占顶部，结束后由 handleBootDone 收起。 */}
+      {booting && <AstraeaIntro onDone={handleBootDone} />}
+
       {isStreaming && (
         <Box flexDirection="column" marginBottom={1}>
           <Text bold color={INDIGO}>✦ Astraea</Text>
-          {streamingText && <Text>{renderMarkdown(streamingText)}</Text>}
+          {streamingText && (() => {
+            // 实时预览只渲染尾部若干行，把帧高封顶 → 避免越界擦除把页脚/输入框盖住。
+            // 完整文本在本轮结束时整段落盘进 Static（见 finalText），故此处截断只影响"进行中"预览。
+            const lines = streamingText.split('\n')
+            const maxLines = Math.max(8, (stdout?.rows ?? 24) - 14)
+            const preview = lines.length <= maxLines
+              ? streamingText
+              : '⋯\n' + lines.slice(-maxLines).join('\n')
+            return <Text>{renderMarkdown(preview)}</Text>
+          })()}
           {/* 在途工具批：逐调用配对 + 同类折叠，liveOutput 挂在 running 调用下。 */}
           {liveTools.length > 0 && <ToolBatch calls={liveTools} liveOutput={liveOutput} />}
           {/* 次要查询循环（如 WechatRead）只设 activeTool、不入 liveTools → 退回单行 spinner。 */}
@@ -1799,17 +1834,6 @@ export function App() {
           {/* 常驻状态行：流式期间一直显示（轮换短语 + 实时秒数 + token + esc 提示），
               解决"跑到一半停住、不知是否还在运行"的问题。置于 live frame 底部。 */}
           <StreamStatus startTime={streamStart} tokens={liveTokens} />
-        </Box>
-      )}
-
-      {/* Background agent spinners — shown even when main agent is idle */}
-      {runningAgents.length > 0 && (
-        <Box flexDirection="column" marginBottom={1}>
-          {runningAgents.map(agent => (
-            <Box key={agent.id}>
-              <Text color="cyan">⟳  [{agent.id}] {agent.description}</Text>
-            </Box>
-          ))}
         </Box>
       )}
 
@@ -1930,6 +1954,17 @@ export function App() {
           onInlineChange={(key, value) => setVigilInlineValues(prev => ({ ...prev, [key]: value }))}
           onInlineSubmit={handleVigilInlineAction}
         />
+      )}
+
+      {/* 后台子 Agent spinner —— 与 Tasks 一起钉在输入框正上方（即便主 Agent 空闲也显示） */}
+      {runningAgents.length > 0 && (
+        <Box flexDirection="column" marginBottom={1}>
+          {runningAgents.map(agent => (
+            <Box key={agent.id}>
+              <Text color="cyan">⟳  [{agent.id}] {agent.description}</Text>
+            </Box>
+          ))}
+        </Box>
       )}
 
       <TodoPanel />

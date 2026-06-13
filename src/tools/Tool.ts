@@ -4,6 +4,7 @@
 // 原版依赖 Zod schema + React 渲染 + 权限系统，这里只保留运行所需的最小接口
 
 import type { SessionMode } from '../state/sessionMode'
+import type { PhoenixTrace } from '../observability/phoenix'
 
 export interface ToolCallResult {
   output: string
@@ -48,6 +49,12 @@ export interface ToolContext {
    * undefined 按 false（fail-closed）处理。
    */
   isInteractive?: boolean
+  /**
+   * Phoenix 可观测性 trace 句柄（路线 B）。由 query() 在每个 turn 创建并穿线注入；
+   * 工具本身一般无需感知，但会 spawn 子 query 的工具（如 AgentTool）可用它把子 agent
+   * 的 trace 挂在主 trace 下。未启用监控时为 undefined/null —— 工具不应依赖它。
+   */
+  phoenixTrace?: PhoenixTrace | null
 }
 
 export const DEFAULT_TOOL_CONTEXT: ToolContext = { mode: 'default', isInteractive: false }

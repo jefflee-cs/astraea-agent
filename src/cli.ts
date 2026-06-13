@@ -47,6 +47,9 @@ if (args.includes('--headless') && args.includes('--task')) {
 
   assertConfig()
   await runHeadlessTask(taskId, prompt, resultFile)
+  // headless 主动 process.exit，先刷 Phoenix span（beforeExit 不会在 process.exit 时触发）
+  const { shutdownPhoenix } = await import('./observability/phoenix')
+  await shutdownPhoenix()
   process.exit(0)
 }
 

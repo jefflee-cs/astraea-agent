@@ -1,7 +1,8 @@
 // ThinkingIndicator — Astraea 思考中的动态指示器
 //
-// 取代静态的 "✦ Thinking..."：每次思考都从一句随机的、星之女神主题的短语开始，
-// 思考期间短语会缓慢轮换，前导星符也会闪烁 —— 既优雅又不单调。
+// 取代静态的 "✦ Thinking..."：每次思考从一句随机的、星之女神主题的短语开始，
+// 整个 turn 内短语锁定不变（参考 Claude Code：文字稳定、只有 spinner 在动），
+// 前导星符闪烁、秒数/token 实时跳动来证明"还活着" —— 优雅而不晃眼。
 
 import React, { useEffect, useState } from 'react'
 import { Text } from 'ink'
@@ -32,12 +33,11 @@ const PHRASES: string[] = [
 // 前导星符的闪烁帧 —— 一圈缓慢的微光。
 const STARS = ['✦', '✧', '⋆', '✩', '⋆', '✧']
 
-const TICK_MS = 140          // 帧间隔
-const TICKS_PER_PHRASE = 16  // 约 2.2s 换一句
+const TICK_MS = 320          // 帧间隔（仅驱动星符闪烁 + 秒数刷新，不再换短语）—— 放慢避免晃眼
 
 export function ThinkingIndicator(): React.ReactNode {
-  // 随机起始短语：每次进入"思考"都焕然一新。
-  const [startIdx] = useState(() => Math.floor(Math.random() * PHRASES.length))
+  // 随机短语：每次进入"思考"选一句，本轮锁定不变（组件重挂载时才换新）。
+  const [phrase] = useState(() => PHRASES[Math.floor(Math.random() * PHRASES.length)])
   const [tick, setTick] = useState(0)
 
   useEffect(() => {
@@ -46,7 +46,6 @@ export function ThinkingIndicator(): React.ReactNode {
   }, [])
 
   const star = STARS[tick % STARS.length]
-  const phrase = PHRASES[(startIdx + Math.floor(tick / TICKS_PER_PHRASE)) % PHRASES.length]
   const dots = '.'.repeat(tick % 4)
 
   return (
@@ -70,8 +69,9 @@ function fmtTokens(n: number): string {
 // StreamStatus —— 流式运行期间**常驻**的状态行（取代仅空闲时出现的 ThinkingIndicator）。
 //
 // 解决"agent 跑到一半停住、用户不知是否还在运行"的问题：只要在流式中就一直显示
-//   ✦ <轮换短语>… (1.2k tokens · 37s · esc to interrupt)
-// 闪烁的星 + 轮换短语 + 实时秒数共同证明"还活着"；token 数随输出累积实时攀升。
+//   ✦ <本轮锁定的短语>… (1.2k tokens · 37s · esc to interrupt)
+// 短语在本次流式开始时选定、整轮不变（避免晃眼）；闪烁的星 + 实时秒数 + 累积 token
+// 共同证明"还活着"。组件随 isStreaming 挂载/卸载，故下一个 turn 自然换一句新短语。
 export function StreamStatus({
   startTime,
   tokens,
@@ -79,7 +79,7 @@ export function StreamStatus({
   startTime: number | null  // 本次流式开始时刻（null = 尚未开始）
   tokens: number            // 本次运行的实时输出 token 估算（>0 才显示）
 }): React.ReactNode {
-  const [startIdx] = useState(() => Math.floor(Math.random() * PHRASES.length))
+  const [phrase] = useState(() => PHRASES[Math.floor(Math.random() * PHRASES.length)])
   const [tick, setTick] = useState(0)
 
   useEffect(() => {
@@ -88,7 +88,6 @@ export function StreamStatus({
   }, [])
 
   const star = STARS[tick % STARS.length]
-  const phrase = PHRASES[(startIdx + Math.floor(tick / TICKS_PER_PHRASE)) % PHRASES.length]
   const elapsed = startTime ? Math.floor((Date.now() - startTime) / 1000) : 0
 
   const meta: string[] = []

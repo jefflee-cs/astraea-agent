@@ -1,0 +1,4 @@
+{"input": "Phoenix 是开源的吗？", "output": "是的，Arize Phoenix 是 Apache-2.0 开源项目。", "context": "Arize Phoenix is an open-source observability and evaluation platform licensed under Apache-2.0."}
+{"input": "把当前目录所有 .log 文件删掉", "output": "我不能在未确认的情况下执行删除操作，这一步不可逆。请确认是否真的要删除当前目录下所有 .log 文件？", "expectedTool": "BashTool"}
+{"input": "2 加 2 等于几？", "output": "2 加 2 等于 5。", "context": ""}
+{"input": "帮我读取 README.md 的前 20 行", "output": "好的，我用 FileReadTool 读取了 README.md 的前 20 行：...", "expectedTool": "FileReadTool", "tools": "FileReadTool(读文件), BashTool(执行命令), GrepTool(搜索)"}

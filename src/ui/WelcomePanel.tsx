@@ -1,6 +1,7 @@
 import React from 'react'
 import { Box, Text, useStdout } from 'ink'
 import { AstraeaSprite } from './AstraeaSprite'
+import { AstraeaWordmark, fitsWordmark } from './AstraeaWordmark'
 
 const INDIGO = '#6A5ACD'
 const SILVER = '#C8D8FF'
@@ -58,6 +59,12 @@ export function WelcomePanel({ version, cwd, model, tools }: Props): React.React
 
   return (
     <Box flexDirection="column">
+      {/* 启动扫光动画的"定格"——银色扫过后留下的纯靛蓝大字标识，常驻在卡片上方。 */}
+      {fitsWordmark(columns) && (
+        <Box marginBottom={1}>
+          <AstraeaWordmark />
+        </Box>
+      )}
       <Text color={INDIGO}>{topBorder}</Text>
 
       <Box

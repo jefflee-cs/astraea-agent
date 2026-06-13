@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.97.1",
+    "@arizeai/phoenix-otel": "^1.0.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ink": "^7.0.3",
     "ink-text-input": "^6.0.0",
