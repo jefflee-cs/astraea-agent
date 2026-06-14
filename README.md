@@ -1,7 +1,8 @@
 <div align="center">
 <img src="./assets/banner.svg" alt="Astraea" width="700"/>
-
 ### An agent of order and precision
+
+![image-20260615002022731](/Users/ronghuizhong/Library/Application Support/typora-user-images/image-20260615002022731.png)
 
 **Astraea** is a terminal-native AI coding agent that resolves disorder — it doesn't just write code, it imposes structure on any problem that arrives with ambiguity, inefficiency, or unchecked complexity.
 
