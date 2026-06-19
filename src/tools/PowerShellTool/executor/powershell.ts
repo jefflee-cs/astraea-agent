@@ -18,13 +18,29 @@ export interface PsOutput {
   timedOut: boolean
 }
 
+let cachedPwsh: string | null | undefined
+
 async function findPwsh(): Promise<string | null> {
-  // prefer pwsh (PowerShell 7+), fall back to powershell (Windows built-in)
+  if (cachedPwsh !== undefined) return cachedPwsh
+  // prefer pwsh (PowerShell 7+, cross-platform), fall back to powershell (Windows built-in).
+  // Probe the binary directly rather than via `which`/`where` — `which` doesn't exist on
+  // Windows and `where` doesn't exist on Unix, so resolver names aren't portable.
   for (const bin of ['pwsh', 'powershell']) {
-    const proc = Bun.spawn(['which', bin], { stdout: 'pipe', stderr: 'pipe' })
-    await proc.exited
-    if (proc.exitCode === 0) return bin
+    try {
+      const proc = Bun.spawn([bin, '-NoProfile', '-Command', '$null'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+      })
+      await proc.exited
+      if (proc.exitCode === 0) {
+        cachedPwsh = bin
+        return bin
+      }
+    } catch {
+      // ENOENT: binary not on PATH — try the next candidate
+    }
   }
+  cachedPwsh = null
   return null
 }
 

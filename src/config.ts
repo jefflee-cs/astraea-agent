@@ -167,6 +167,18 @@ export function activeMaxTokens(): number {
   }
 }
 
+// 当前激活 provider 是否已配置可用的 API Key。
+// ollama 走本地、无需 key，视为永远「已配置」。
+export function hasValidConfig(): boolean {
+  switch (config.provider) {
+    case 'anthropic': return !!config.anthropic.apiKey
+    case 'deepseek':  return !!config.deepseek.apiKey
+    case 'openai':    return !!config.openai.apiKey
+    case 'ollama':    return true
+    default:          return false
+  }
+}
+
 export function assertConfig(): void {
   if (config.provider === 'anthropic' && !config.anthropic.apiKey) {
     console.error('Error: ANTHROPIC_API_KEY is not set (or run /login)')

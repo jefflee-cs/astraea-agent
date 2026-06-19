@@ -16,7 +16,7 @@ import { AstraeaIntro } from './AstraeaIntro'
 import { StreamStatus } from './ThinkingIndicator'
 import { LoginWizard, formatLoginSuccess } from './LoginWizard'
 import type { LoginResult } from './LoginWizard'
-import { config, updateProviderConfig, saveConfigToEnv } from '../config'
+import { config, updateProviderConfig, saveConfigToEnv, hasValidConfig } from '../config'
 import { resetAllApiClients } from '../api/stream'
 import { getSystemPrompt } from '../context/systemPrompt/builder'
 import { onQuestion, answer } from '../tools/AskUserQuestionTool/bridge'
@@ -281,7 +281,9 @@ export function App() {
   // 真实内容存在 ref map 里，提交时展开喂给模型。
   const pasteStoreRef = useRef<Map<string, string>>(new Map())
   const pasteCounterRef = useRef(0)
-  const [showLogin, setShowLogin] = useState(false)
+  // 没配置 API Key（首次启动、没有 .env）时自动弹出 /login 向导，
+  // 而不是让 repl 启动时崩掉——保证用户能进界面、直接配置。
+  const [showLogin, setShowLogin] = useState(() => !hasValidConfig())
   // AskUserQuestion: pending question from the model
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null)
   // System prompt loaded asynchronously on mount
@@ -1463,7 +1465,7 @@ export function App() {
       historyIndexRef.current = -1
       setInputValue((prev) => prev + token)
     },
-    { isActive: !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && !(pendingQuestion?.options?.length && !questionFreeText) },
+    { isActive: !showLogin && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && !(pendingQuestion?.options?.length && !questionFreeText) },
   )
 
   // 提交时把占位符展开回真实内容（喂给模型）；消费后从 store 删除。

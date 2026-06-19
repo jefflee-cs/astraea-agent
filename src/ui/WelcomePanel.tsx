@@ -42,17 +42,21 @@ interface Props {
 export function WelcomePanel({ version, cwd, model, tools }: Props): React.ReactNode {
   const { stdout } = useStdout()
   const columns = stdout?.columns ?? 80
+  // 渲染宽度留 1 列：占满整行（=columns）的边框/Box 在 Windows 终端会自动换行，
+  // 多占一行物理行，导致 Ink 重绘错位、卡片被撑歪/重影（issue「Windows 表格格式有问题」）。
+  // 仅用于实际绘制；twoCol / fitsWordmark 这类布局判断仍用真实 columns。
+  const panelW = Math.max(1, columns - 1)
 
   const twoCol = columns >= 64
 
   const toolLine = tools.slice(0, 3).join(', ') + (tools.length > 3 ? ' …' : '')
   const truncCwd = cwd.length > 38 ? '…' + cwd.slice(cwd.length - 37) : cwd
 
-  // Title border — '╭' at col 0, '╮' at col columns-1, total = columns chars
+  // Title border — '╭' at col 0, '╮' at col panelW-1, total = panelW chars
   const tag = ` Astraea v${version} `
-  const dashes = '─'.repeat(Math.max(0, columns - 3 - visWidth(tag)))
+  const dashes = '─'.repeat(Math.max(0, panelW - 3 - visWidth(tag)))
   const topBorder = `╭─${tag}${dashes}╮`
-  const botBorder = `╰${'─'.repeat(Math.max(0, columns - 2))}╯`
+  const botBorder = `╰${'─'.repeat(Math.max(0, panelW - 2))}╯`
 
   // Left panel is 24 terminal cols wide (sprite is ~9 wide, subtitle is "星之女神 · AI" = 14 wide)
   const LEFT_W = 24
@@ -75,7 +79,7 @@ export function WelcomePanel({ version, cwd, model, tools }: Props): React.React
         flexDirection={twoCol ? 'row' : 'column'}
         paddingX={1}
         paddingY={1}
-        width={columns}
+        width={panelW}
       >
         {/* Left panel: sprite + subtitle */}
         <Box

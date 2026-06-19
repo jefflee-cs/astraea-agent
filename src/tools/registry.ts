@@ -1,6 +1,7 @@
 // 工具注册表 — 唯一的工具定义入口
 // getAllTools()   → 主 Agent 完整工具集
 // getWorkerTools() → 子 Agent 工具集（去掉协调工具）
+import { platform } from 'os'
 import type { Tool, ToolSchema } from './Tool'
 import { BashTool } from './BashTool'
 import { FileReadTool } from './FileReadTool'
@@ -41,12 +42,21 @@ import { SendUserFileTool } from './SendUserFileTool'
 import { ReviewArtifactTool } from './ReviewArtifactTool'
 import { getMcpTools } from '../mcp/registry'
 
+const IS_WIN = platform() === 'win32'
+
+// 每个平台只暴露一个 shell 工具：Windows 用 PowerShell（无 /bin/bash），
+// macOS/Linux 用 Bash。避免模型在 Windows 上调用 BashTool 触发 spawn '/bin/bash' ENOENT。
+function filterShellTools(tools: Tool[]): Tool[] {
+  const drop = IS_WIN ? BashTool.name : PowerShellTool.name
+  return tools.filter((t) => t.name !== drop)
+}
+
 export function getAllTools(): Tool[] {
   return [...getBuiltinToolList(), ...getMcpTools()]
 }
 
 function getBuiltinToolList(): Tool[] {
-  return [
+  return filterShellTools([
     BashTool,
     FileReadTool,
     FileEditTool,
@@ -86,13 +96,13 @@ function getBuiltinToolList(): Tool[] {
     ReadMcpResourceTool,
     SendUserFileTool,
     ReviewArtifactTool,
-  ]
+  ])
 }
 
 // 子 Agent 工具集 — 去掉 AgentTool、SendMessageTool、ListPeersTool（协调专属工具）
 // 子 Agent 只能"做任务、汇报结果"，通信权保留在协调器
 export function getWorkerTools(): Tool[] {
-  return [
+  return filterShellTools([
     BashTool,
     FileReadTool,
     FileEditTool,
@@ -111,7 +121,7 @@ export function getWorkerTools(): Tool[] {
     TaskStopTool,
     TaskOutputTool,
     AskUserQuestionTool,
-  ]
+  ])
 }
 
 // 微信工具名集合 —— 仅可由用户显式 /wechat（直接执行）或 /vigil wechat（调度后

@@ -31,7 +31,11 @@ interface ModeInputFrameProps {
 
 export function ModeInputFrame({ mode, children }: ModeInputFrameProps) {
   const { stdout } = useStdout()
-  const cols = stdout?.columns ?? 80
+  // 关键：用 cols-1 而不是 cols。占满整行宽度（=cols）的字符串在 Windows 终端
+  // （conhost / Windows Terminal）会触发自动换行、多占一行物理行；Ink 重绘时按
+  // 逻辑行数往上回退光标、却少算了这一行，导致上一帧没被擦掉、横幅一层层堆叠
+  // （每敲一个字就往上抖一下 / ✦ Astraea 重复刷屏的根因）。留 1 列即可避免换行。
+  const cols = Math.max(1, (stdout?.columns ?? 80) - 1)
   const meta = MODE_META[mode]
 
   // 上边横线：模式标签嵌在中间
@@ -61,7 +65,8 @@ interface ModeSwitchBannerProps {
 
 export function ModeSwitchBanner({ mode }: ModeSwitchBannerProps) {
   const { stdout } = useStdout()
-  const cols = stdout?.columns ?? 80
+  // 见 ModeInputFrame：占满整行会在 Windows 触发换行 → 重绘错位 → 横幅刷屏堆叠。
+  const cols = Math.max(1, (stdout?.columns ?? 80) - 1)
   const meta = MODE_META[mode]
 
   const inner = ` switched to ${meta.label} `

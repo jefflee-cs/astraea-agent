@@ -176,7 +176,8 @@ export function LoginWizard({ onDone }: Props): React.ReactNode {
               value={apiKey}
               onChange={setApiKey}
               mask="*"
-              placeholder="输入后按 Enter 保存..."
+              enablePaste
+              placeholder="输入后按 Enter 保存（支持粘贴）..."
               onSubmit={(val) => {
                 if (val.trim()) onDone({ provider, model, apiKey: val.trim() })
               }}

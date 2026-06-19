@@ -6,7 +6,7 @@
 import { render } from 'ink'
 import React from 'react'
 import { App } from './ui/App'
-import { assertConfig, config } from './config'
+import { hasValidConfig, config } from './config'
 import { listTools } from './tools/registry'
 
 // 管理子命令：`astraea mcp …` / `astraea plugin …`（全局 bin 指向本文件）。
@@ -23,7 +23,9 @@ if (argv[0] === 'plugin') {
   process.exit(0)
 }
 
-assertConfig()
+// 不再因为缺 API Key 直接退出——否则用户连界面都进不去，没法跑 /login。
+// 缺 key 时照常启动 UI，由 App 自动弹出 /login 向导引导配置（见 App 的 showLogin 初值）。
+const configured = hasValidConfig()
 
 const provider = config.provider
 const model =
@@ -33,7 +35,11 @@ const model =
       ? config.openai.model
       : config.anthropic.model
 
-process.stderr.write(`[provider] ${provider} / ${model}\n`)
+process.stderr.write(
+  configured
+    ? `[provider] ${provider} / ${model}\n`
+    : `[provider] ${provider} — 未配置 API Key，启动后请用 /login 配置\n`,
+)
 
 // render() 接管终端（raw mode），返回 waitUntilExit() Promise
 const { waitUntilExit } = render(<App />)
