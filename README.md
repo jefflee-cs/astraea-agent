@@ -111,47 +111,103 @@ Now you can launch Astraea from any directory by typing `astraea` in PowerShell.
 
 ### Configure provider
 
-After installation, configure your provider. Copy the example env and add a key:
+Astraea needs an **AI model provider** to function (this is the brain that powers it). Copy the example config file:
 
 ```bash
 cp .env.example .env
 ```
 
+#### What is an "API key"?
+
+An **API key** is a secret token (a long string like `sk-ant-xxxxxxxxxxxxx`) that proves you have access to an AI service. Think of it like a password for an AI account.
+
+You get one for free (or with a free trial balance) by signing up at a provider's website. Common providers:
+
+| Provider | Powers | Where to get a key |
+|----------|--------|--------------------|
+| **Anthropic (Claude)** | The default — best coding & reasoning quality | [console.anthropic.com](https://console.anthropic.com) → API Keys → Create key |
+| **DeepSeek** | Strong, very low cost | [platform.deepseek.com](https://platform.deepseek.com) → API Keys |
+| **OpenAI (GPT)** | A solid alternative | [platform.openai.com](https://platform.openai.com) → API Keys |
+| **Ollama** | Fully **local**, runs on your own machine | **No key needed** — just install [ollama.com](https://ollama.com) and pull a model |
+
+> **Security:** Never commit API keys to git. The `.env` file is already in `.gitignore`, but we recommend storing keys in `~/.astraea/.env` (global config) so all Astraea projects reuse them without risk. Run `mkdir -p ~/.astraea` to create that directory.
+
+#### Step 1 — Pick an AI model provider
+
+Edit `.env` and fill in **exactly one** provider. Remove the `#` comment marker in front of the lines for your chosen provider:
+
 ```bash
-# .env  — pick one provider
-
-# Anthropic (default — omit PROVIDER or set PROVIDER=anthropic)
+# ── Anthropic (Claude) — recommended, highest quality ──
+# Sign up at https://console.anthropic.com → API Keys
 ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx
+# (PROVIDER can be omitted — anthropic is the default)
 
-# DeepSeek
-PROVIDER=deepseek
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxx
+# ── DeepSeek — strong, low-cost ──
+# Sign up at https://platform.deepseek.com → API Keys
+# PROVIDER=deepseek
+# DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxx
 
-# OpenAI
+# ── OpenAI (GPT) ──
+# Sign up at https://platform.openai.com → API Keys
 # PROVIDER=openai
 # OPENAI_API_KEY=sk-xxxxxxxxxxxxx
 
-# Ollama (fully local, no key needed)
+# ── Ollama — fully local, runs on your machine, no API key needed ──
+# Install from https://ollama.com, then pull a model (e.g. ollama pull qwen2.5:7b)
 # PROVIDER=ollama
 # OLLAMA_MODEL=qwen2.5:7b
 ```
 
-> **Tip:** Personal API keys (search providers, etc.) can live in a global `~/.astraea/.env`, so every Astraea project reuses them and you never risk committing a secret. Create it with `mkdir -p ~/.astraea`.
+#### Step 2 (optional) — Enable web search
 
-Optional — enable web search. The easiest way is the in-REPL `/internet` wizard (pick a provider, paste the key, it's saved to `~/.astraea/.env` for you). Or set one of these manually:
+Astraea can search the internet for you — useful for research, checking documentation, reading news, or fetching real-time information. This requires a **web search API** (a specialized search engine designed for AI agents to call programmatically).
+
+**Easiest way:** Launch Astraea and type `/internet` in the REPL — it walks you through picking a provider and pasting the key. Saved automatically.
+
+**Manual way:** Add one of the following to `.env` (or `~/.astraea/.env` for global reuse):
 
 ```bash
-# China-direct (no proxy needed) — recommended for users in mainland China
-BOCHA_API_KEY=sk-xxx           # 博查 Bocha — built for AI agents
-# ZHIPU_API_KEY=xxx            # 智谱 BigModel — reuse an existing Zhipu key
+# ══════════════════════════════════════════════════════
+# 🇨🇳 China-direct — NO proxy/VPN required
+# ══════════════════════════════════════════════════════
 
-# Global (proxy typically required in mainland China)
-# TAVILY_API_KEY=tvly-xxx      # 1,000 req/mo, built for AI agents
-# BRAVE_SEARCH_API_KEY=BSA-xxx # 2,000 req/mo
-# EXA_API_KEY=xxx              # 1,000 req/mo, semantic search for research
+# 博查 (Bocha) — recommended for users in mainland China
+# What it does: general-purpose web search, purpose-built for AI agents
+# Pricing: pay-as-you-go (free starting balance, very cheap)
+# How to get a key: https://open.bochaai.com → 注册 → API Key
+BOCHA_API_KEY=sk-xxxxxxxxxxxxx
+
+# 智谱 (BigModel / Zhipu) — reuse an existing Zhipu account
+# What it does: general web search + news search
+# Pricing: included with Zhipu API usage
+# How to get a key: https://open.bigmodel.cn → API Keys
+# ZHIPU_API_KEY=xxxxxxxxxxxxx
+# ZHIPU_SEARCH_ENGINE=search_std    # optional: search_std (default) | search_pro
+
+# ══════════════════════════════════════════════════════
+# 🌐 Global — may need a proxy in mainland China
+# ══════════════════════════════════════════════════════
+
+# Tavily — purpose-built search engine for AI agents
+# What it does: returns clean, extracted content (no raw HTML), designed for RAG/Agent
+# Free tier: 1,000 requests/month, no credit card required
+# How to get a key: https://app.tavily.com → Sign up → copy "API Key" (starts with tvly-)
+TAVILY_API_KEY=tvly-xxxxxxxxxxxxx
+
+# Brave Search — from the creators of Brave browser
+# What it does: independent, privacy-respecting web search index
+# Free tier: 2,000 requests/month
+# How to get a key: https://brave.com/search/api/ → Get started → copy key (starts with BSA-)
+# BRAVE_SEARCH_API_KEY=BSA-xxxxxxxxxxxxx
+
+# Exa — semantic search engine, great for deep research
+# What it does: understands intent, not just keywords — "find recent articles about …"
+# Free tier: 1,000 requests/month
+# How to get a key: https://dashboard.exa.ai → API Keys → Create
+# EXA_API_KEY=xxxxxxxxxxxxx
 ```
 
-The auto-detect chain prefers China-direct providers first (Bocha → Zhipu → Brave → Tavily → Exa), so a single configured key just works.
+Astraea auto-detects which key you have. Detection order: **Bocha → Zhipu → Brave → Tavily → Exa** — configure just one and it works.
 
 ---
 
@@ -188,6 +244,8 @@ You can configure everything interactively — no need to hand-edit `.env`. On *
 | `/login` | Choose provider + model and paste the API key. Saved and applied live. |
 | `/internet` | Choose a web-search provider (Bocha · Zhipu · Tavily · Brave · Exa) and paste the key. Saved to `~/.astraea/.env`. |
 | `/language` | Switch UI + reply language (English · Deutsch · Français · Español · 中文 · 한국어). Applies instantly, no restart. Also accepts a direct arg, e.g. `/language en`. |
+| `/reason` | Set reasoning effort: `low` · `medium` · `high` · `max` · `auto`. Controls how deeply the model "thinks" before answering — higher effort means deeper reasoning but slower responses and more tokens. Maps to Anthropic's thinking budget and OpenAI's `reasoning_effort` knob. `auto` clears the override and follows the provider default. The `max` level applies to this session only (not persisted). |
+| `/usage` | Show session token usage and estimated cost in USD. Breaks down input, output, and prompt-cache tokens per model/provider, with a total and cost. Helps you monitor spending across a session. |
 | `/help` | List all available commands and skills. |
 
 > Type `/` to open the command picker with inline autocomplete.
