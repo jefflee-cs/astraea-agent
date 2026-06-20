@@ -107,15 +107,36 @@ export function splitCodeComment(code: string, syntax: CommentSyntax): Segment[]
   return segments
 }
 
+const GUTTER = '#6B7280'   // 行号沟（中性灰）
+const GUTTER_GAP = '    '   // 行号与 +/- 标记之间的间隔（拉开距离，行号不贴着标记）
+
 // 满宽带目标列宽：终端列 - (ResultLines 的 marginLeft 4 + 3 空格 gutter + 1 安全余量)。
-function bandWidth(): number {
+// reserved 额外扣掉行号沟自身的宽度，保证「行号沟 + 背景带」整体不超宽、不触发折行。
+function bandWidth(reserved = 0): number {
   const cols = process.stdout?.columns
   const n = typeof cols === 'number' && cols > 0 ? cols : 80
-  return Math.max(20, n - 8)
+  return Math.max(20, n - 8 - reserved)
 }
 
-// 把一行内容渲染成"自带 ANSI 的满宽背景带"。content 不含 +/- 标记（本函数自绘标记）。
-export function styleDiffLine(content: string, type: 'add' | 'remove', filePath: string): string {
+// 把一行内容渲染成「左侧行号沟 + 自带 ANSI 的满宽背景带」。
+//   · gutter：右对齐的行号字符串（renderResult 算好传入）；空串表示不画沟。
+//   · type='context'：未改动的上下文行，灰字、无背景带、对齐 +/- 标记位。
+// content 不含 +/- 标记（本函数自绘标记）。
+export function styleDiffLine(
+  content: string,
+  type: 'add' | 'remove' | 'context',
+  filePath: string,
+  gutter = '',
+): string {
+  // 行号沟：灰色行号 + GUTTER_GAP 间隔分隔（无行号时不占位）。
+  const gut = gutter ? c.hex(GUTTER)(gutter) + GUTTER_GAP : ''
+  const gutW = gutter ? stringWidth(gutter) + GUTTER_GAP.length : 0
+
+  // 上下文行：不铺背景，灰字；前缀两个空格占住 +/- 标记位，使列对齐。
+  if (type === 'context') {
+    return gut + c.hex(COMMENT).dim('  ' + content)
+  }
+
   const bg = type === 'add' ? ADD_BG : DEL_BG
   const marker = type === 'add' ? '+' : '-'
   const syntax = commentSyntaxFor(filePath)
@@ -133,7 +154,7 @@ export function styleDiffLine(content: string, type: 'add' | 'remove', filePath:
     visible += stringWidth(seg.text)
   }
   // 补齐到满宽（短行铺满背景；长行不补，由 Ink 折行、bg 自然延续）。
-  const target = bandWidth()
+  const target = bandWidth(gutW)
   if (visible < target) out += c.bgHex(bg)(' '.repeat(target - visible))
-  return out
+  return gut + out
 }

@@ -7,8 +7,48 @@ import chalk from 'chalk'
 import stringWidth from 'string-width'
 import stripAnsi from 'strip-ansi'
 import wrapAnsi from 'wrap-ansi'
+import { highlight, supportsLanguage } from 'cli-highlight'
+import { createRequire } from 'node:module'
+import { VERDICT_COLOR, type VerdictKind } from '../ui/theme'
 
 const EOL = '\n'
+
+// Verdict 标记：模型在「结论行」行首打一个 ⟦ok⟧/⟦warn⟧/⟦err⟧，renderer 据此整行上色并
+// 把标记吞掉（绝不显示给用户）。仅在「自成一段的结论行」生效，普通正文不受影响。
+const VERDICT_RE = /^⟦(ok|warn|err)⟧[ \t]*/
+
+// 按状态色给整句上色。深绿是 hex（c.hex），红/黄是 chalk 具名色（c.red / c.yellow）。
+function colorizeVerdict(c: C, kind: VerdictKind, text: string): string {
+  const v = VERDICT_COLOR[kind]
+  return v.startsWith('#')
+    ? c.hex(v)(text)
+    : (c as unknown as Record<string, (s: string) => string>)[v]!(text)
+}
+
+// cli-highlight 用自带的 chalk@4 上色，其色彩等级在「导入时」缓存一次。Ink 接管终端后
+// isTTY 常被探到 0 → 代码块整段丢色。这里直接拿到 cli-highlight 实际 require 的那个 chalk
+// 实例，把 level 顶到 truecolor（与本文件给自己的 chalk 强制 level 3 同一策略）。
+// 这是确定性的，不依赖 import 先后；尊重 NO_COLOR / FORCE_COLOR=0 的关色意图。
+;(() => {
+  if (process.env.NO_COLOR !== undefined || process.env.FORCE_COLOR === '0') return
+  try {
+    const req = createRequire(import.meta.url)
+    const chalkPath = req.resolve('chalk', { paths: [req.resolve('cli-highlight')] })
+    const hlChalk = req(chalkPath) as { level: number }
+    if (hlChalk && typeof hlChalk.level === 'number' && hlChalk.level < 2) hlChalk.level = 3
+  } catch {
+    // 解析不到就算了——高亮丢色不影响功能，代码块仍正常显示。
+  }
+})()
+
+// ANSI 感知的「末尾硬截断」：可见宽度超过 width 时只保留首屏并缀 …，绝不插入换行。
+// 用于代码块——长命令（git tag -m "…"）若被 Ink 折行，复制时会被换行符污染而执行出错；
+// 宁可截断也不折行（grill 决议，trace 3）。
+function clampAnsiLine(line: string, width: number): string {
+  if (stringWidth(line) <= width) return line
+  const head = wrapAnsi(line, Math.max(1, width - 1), { hard: true, trim: false }).split(EOL)[0] ?? ''
+  return head + '…'
+}
 
 // 终端可用列宽。Ink 把整段 markdown 放在贴边（marginLeft=0）的 <Text> 里，默认 wrap='wrap'，
 // 一旦某行可见宽度超过这个值，Ink 就会硬折行，把表格的竖线打散。所以表格必须先把自己
@@ -76,6 +116,12 @@ function formatToken(token: Token, c: C, listDepth: number): string {
 
     case 'paragraph': {
       const inner = (token.tokens ?? []).map(t => formatToken(t, c, 0)).join('')
+      // 结论行：⟦kind⟧ 开头 → 吞掉标记，整段按状态色上色（深绿/黄/红）。
+      const m = inner.match(VERDICT_RE)
+      if (m) {
+        const body = inner.slice(m[0].length)
+        return colorizeVerdict(c, m[1] as VerdictKind, body) + EOL + EOL
+      }
       return inner + EOL + EOL
     }
 
@@ -98,16 +144,25 @@ function formatToken(token: Token, c: C, listDepth: number): string {
       // 行内代码：唯一保留的强调色（cyan 单一强调色，仅 code/链接使用）。
       return c.cyan(token.text)
 
-    case 'code':
-      // 代码块：dim 围栏 + 默认前景正文（去掉刺眼黄色，块级不铺色，对齐 CC）。
-      return (
-        c.dim('```' + (token.lang ?? '')) +
-        EOL +
-        token.text +
-        EOL +
-        c.dim('```') +
-        EOL + EOL
-      )
+    case 'code': {
+      // 代码块：按语言做语法高亮（cli-highlight = highlight.js 的终端版），
+      // 关键字/字符串/注释各自上色，降低认知负载（trace 3：bash 该有颜色）。
+      // 再对每行做 ANSI 感知的末尾截断，长命令绝不被硬折行破坏。
+      const lang = (token.lang ?? '').trim()
+      let body = token.text
+      try {
+        body = lang && supportsLanguage(lang)
+          ? highlight(token.text, { language: lang, ignoreIllegals: true })
+          : highlight(token.text, { ignoreIllegals: true })
+      } catch {
+        body = token.text  // 高亮失败（生僻语言）→ 退回原文，不影响可读性。
+      }
+      const width = termWidth()
+      // 不打印字面 ``` 围栏——终端里 ``` 是噪声，靠语法高亮本身就能把代码块与正文区分开
+      // （eval Item 7：用户问"为什么还会展示 ``` ```"）。仅保留高亮正文 + 前后空行做块分隔。
+      const lines = body.split(EOL).map((l: string) => clampAnsiLine(l, width))
+      return lines.join(EOL) + EOL + EOL
+    }
 
     case 'blockquote': {
       const inner = (token.tokens ?? []).map(t => formatToken(t, c, 0)).join('')
@@ -166,7 +221,10 @@ function formatToken(token: Token, c: C, listDepth: number): string {
       return EOL
 
     case 'space':
-      return EOL
+      // 块级 token 已各自以 EOL+EOL 收尾（自带一行空行做分隔）。space 出现在两个块之间，
+      // 若再补 EOL 就变成「两行空行」——无论模型输出 \n\n 还是 \n\n\n，marked 都归并成一个
+      // space token，所以这里返回空串，统一压成单行空行（eval Item 8：行距太大）。
+      return ''
 
     case 'table': {
       const tbl = token as Tokens.Table
@@ -174,6 +232,7 @@ function formatToken(token: Token, c: C, listDepth: number): string {
         (tokens ?? []).map(t => formatToken(t, c, 0)).join('')
       const MIN_W = 3
       const ncols = tbl.header.length
+      const b = c.hex('#6A5ACD')  // indigo table borders
 
       // 自然列宽：按"可见宽度"计算（去 ANSI 后用 stringWidth，CJK 全角算 2 列），最小 3。
       const natural = tbl.header.map((h, i) => {
@@ -205,13 +264,13 @@ function formatToken(token: Token, c: C, listDepth: number): string {
         const height = Math.max(1, ...cellLines.map(l => l.length))
         const out: string[] = []
         for (let r = 0; r < height; r++) {
-          let line = c.dim('│')
+          let line = b('│')
           for (let i = 0; i < ncols; i++) {
             const cellLine = cellLines[i]![r] ?? ''
             const visible = stringWidth(stripAnsi(cellLine))
             const styled = bold ? c.bold(cellLine) : cellLine  // 表头单色加粗（去 cyan）
             const padded = padAligned(styled, visible, widths[i]!, tbl.align?.[i])
-            line += ' ' + padded + ' ' + c.dim('│')
+            line += ' ' + padded + ' ' + b('│')
           }
           out.push(line)
         }
@@ -219,7 +278,7 @@ function formatToken(token: Token, c: C, listDepth: number): string {
       }
 
       const border = (left: string, mid: string, right: string) =>
-        c.dim(left + widths.map(w => '─'.repeat(w + 2)).join(mid) + right)
+        b(left + widths.map(w => '─'.repeat(w + 2)).join(mid) + right)
 
       const lines = [
         border('┌', '┬', '┐'),

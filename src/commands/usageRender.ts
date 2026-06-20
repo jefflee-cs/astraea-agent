@@ -11,20 +11,17 @@ const tok = (n: number) =>
     : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k`
     : String(n)
 
-/** 把累计 usage 行渲染成 /usage 文本。空 → 提示语；否则逐行 + 合计 + 未定价说明。 */
+/** 把累计 usage 行渲染成 Markdown 表格（由 renderMarkdown 渲染为 indigo 边框表格）。空 → 提示语。 */
 export function renderUsage(rows: ModelUsage[]): string {
   if (rows.length === 0) {
     return 'No model usage yet this session.'
   }
 
-  // 列宽按「provider/model」标签对齐，使带 provider 的行也整齐。
-  const label = (r: ModelUsage) => `${r.provider}/${r.model}`
-  const labelW = Math.max(...rows.map(r => label(r).length))
   let totalTokens = 0
   let totalUsd = 0
   let anyUnpriced = false
 
-  const lines = rows.map(r => {
+  const rows_md = rows.map(r => {
     const cache = r.cacheRead + r.cacheCreation
     totalTokens += r.input + r.output + cache
     const { usd, local } = computeCost(r.model, r.provider, {
@@ -32,15 +29,22 @@ export function renderUsage(rows: ModelUsage[]): string {
     })
     let costStr: string
     if (local) costStr = 'local·free'
-    else if (usd === null) { anyUnpriced = true; costStr = '— (unpriced)' }
+    else if (usd === null) { anyUnpriced = true; costStr = '—' }
     else { totalUsd += usd; costStr = `$${usd.toFixed(2)}` }
-    return `  ${label(r).padEnd(labelW)}  in ${tok(r.input).padStart(6)}  out ${tok(r.output).padStart(6)}  cache ${tok(cache).padStart(6)}  ${costStr}`
+    return `| ${r.provider}/${r.model} | ${tok(r.input)} | ${tok(r.output)} | ${tok(cache)} | ${costStr} |`
   })
 
-  const parts = ['**Session usage**', '', ...lines, '',
-    `  Total  ${tok(totalTokens)} tokens · $${totalUsd.toFixed(2)} USD`]
+  const parts = [
+    '**Session usage**',
+    '',
+    '| Model | Input | Output | Cache | Cost |',
+    '|---|---|---|---|---|',
+    ...rows_md,
+    '',
+    `  **Total:** ${tok(totalTokens)} tokens · $${totalUsd.toFixed(2)} USD`,
+  ]
   if (anyUnpriced) {
-    parts.push('', '  Some models are unpriced — add them to `src/api/pricing.ts` to include their cost.')
+    parts.push('', '  _Some models are unpriced — add them to `src/api/pricing.ts` to include their cost._')
   }
   return parts.join('\n')
 }

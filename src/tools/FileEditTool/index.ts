@@ -14,6 +14,7 @@ import { validateWrite, recordWrite } from '../readFileState'
 import { checkWritePermission } from '../fileWriteGate'
 import { findActualString, preserveQuoteStyle, applyEdit, formatDiff } from './utils'
 import { styleDiffLine } from '../diffStyle'
+import { displayPath } from '../../utils/displayPath'
 
 export const FileEditTool = buildTool({
   name: 'Edit',
@@ -162,8 +163,8 @@ Common patterns:
     // ── 写后更新 readFileState，允许 LLM 立即再次编辑 ─────────────────────
     recordWrite(absolutePath)
 
-    // ── 格式化输出（含简易 diff） ─────────────────────────────────────────
-    const diff = formatDiff(actualOldString, actualNewString)
+    // ── 格式化输出（标准 unified diff，含上下文 + 行号头）────────────────────
+    const diff = formatDiff(fileContents, updatedFile)
     const suffix = replaceAll ? ' (all occurrences replaced)' : ''
     return {
       output: `The file ${filePath} has been updated successfully${suffix}.\n\`\`\`diff\n${diff}\n\`\`\``,
@@ -173,16 +174,38 @@ Common patterns:
   renderResult(input, output, isError) {
     if (isError) return null
     const filePath = input['file_path'] as string
+    const shownPath = displayPath(filePath)
     const diffMatch = output.match(/```diff\n([\s\S]*?)\n```/)
-    if (!diffMatch) return [`Updated → ${filePath}`]
+    if (!diffMatch) return [`Updated → ${shownPath}`]
     const diffLines = diffMatch[1]!.split('\n')
     const added = diffLines.filter(l => l.startsWith('+')).length
     const removed = diffLines.filter(l => l.startsWith('-')).length
-    const header = `Updated → ${filePath}  (+${added} / -${removed})`
-    // 每行渲染成满宽背景带：'+ '/'-' → 类型，slice(2) 去掉 formatDiff 的标记+空格取正文。
-    const banded = diffLines.map(l => {
-      const type = l[0] === '+' ? 'add' : 'remove'
-      return styleDiffLine(l.slice(2), type, filePath)
+    const header = `Updated → ${shownPath}  (+${added} / -${removed})`
+
+    // @@ -oldStart,oldCount +newStart,newCount @@ → 推导每行的左侧行号沟。
+    const hunk = diffLines[0]?.match(/^@@ -(\d+),\d+ \+(\d+),\d+ @@/)
+    let oldNo = hunk ? Number(hunk[1]) : 1
+    let newNo = hunk ? Number(hunk[2]) : 1
+    const body = hunk ? diffLines.slice(1) : diffLines
+    // 行号沟宽度：取本 hunk 出现的最大行号位数，右对齐。
+    const maxNo = Math.max(oldNo + removed + added, newNo + removed + added)
+    const gutterW = String(maxNo).length
+
+    const banded = body.map(l => {
+      const marker = l[0]
+      const content = l.slice(1)
+      if (marker === '+') {
+        const g = String(newNo++).padStart(gutterW)
+        return styleDiffLine(content, 'add', filePath, g)
+      }
+      if (marker === '-') {
+        const g = String(oldNo++).padStart(gutterW)
+        return styleDiffLine(content, 'remove', filePath, g)
+      }
+      // 上下文行：old/new 同步前进，沟里显示新文件行号。
+      const g = String(newNo).padStart(gutterW)
+      oldNo++; newNo++
+      return styleDiffLine(content, 'context', filePath, g)
     })
     return [header, ...banded]
   },

@@ -5,6 +5,7 @@
 // 同一个 <ToolBatch> 既渲染 live frame 的在途批，也渲染落盘到 <Static> 的已完成批。
 import React from 'react'
 import { Box, Text } from 'ink'
+import { toolStatusColor, aggregateStatusColor } from './theme'
 
 // 一次工具调用（在途或已完成）。result 在 tool_result 事件按 id 回填。
 export interface ToolCall {
@@ -38,22 +39,26 @@ export function groupCalls(calls: ToolCall[]): Group[] {
 
 // 结果多行块：第一行 ⎿，后续行按 +/- 上色（对齐原 tool_result 渲染）。
 function ResultLines({ lines }: { lines: string[] }) {
+  // 拍平内嵌换行：像 Glob 这类无 renderResult 的工具，整段结果是「一个含 \n 的字符串」，
+  // 若不拆开，那些续行会落回 marginLeft 基线（第 4 列）而不是对齐到 ⎿ 内容（第 7 列），
+  // 形成参差。拆成「每物理行一个元素」后，首行画 ⎿、续行统一 3 空格悬挂缩进 → 内容齐第 7 列。
+  const flat = lines.flatMap(l => l.split('\n'))
   return (
     <Box flexDirection="column" marginLeft={4} marginBottom={1}>
-      <Text color="gray" dimColor>⎿  {lines[0]}</Text>
-      {lines.slice(1).map((line, i) => {
+      {flat.map((line, i) => {
+        const prefix = i === 0 ? '⎿  ' : '   '
         // 工具自带 ANSI 样式（如 Edit/Write 的 diff 背景带）→ 原样输出，不再二次上色，
         // 让内嵌的 bg/fg 完全生效（与 markdown 渲染同模式：纯 <Text> 透传 ANSI）。
         if (line.includes('\x1b[')) {
-          return <Text key={i}>{'   '}{line}</Text>
+          return <Text key={i}>{prefix}{line}</Text>
         }
         const t = line.trimStart()
         const isAdded = t.startsWith('+')
         const isRemoved = t.startsWith('-')
         const color = isAdded ? 'green' : isRemoved ? 'red' : 'gray'
         return (
-          <Text key={i} color={color} dimColor={!isAdded && !isRemoved}>
-            {'   '}{line}
+          <Text key={i} color={color} dimColor={!isAdded && !isRemoved} wrap="truncate-end">
+            {prefix}{line}
           </Text>
         )
       })}
@@ -75,9 +80,10 @@ function LiveOut({ text }: { text: string }) {
 // 非折叠：经典两段式——⏺ 调用行 + 其 result 块。running 时缀 " …"。
 function ToolCallRow({ call, liveOutput }: { call: ToolCall; liveOutput?: string }) {
   const running = call.status === 'running'
+  // 调用头按状态色矩阵上色：running 黄（进行中）· done 绿（已落盘）· error 红（失败）。
   return (
     <Box flexDirection="column">
-      <Text color="yellow">⏺  {call.name}({call.argText}){running ? ' …' : ''}</Text>
+      <Text color={toolStatusColor(call.status)} wrap="truncate-end">⏺  {call.name}({call.argText}){running ? ' …' : ''}</Text>
       {!running && call.resultLines ? <ResultLines lines={call.resultLines} /> : null}
       {running && liveOutput ? <LiveOut text={liveOutput} /> : null}
     </Box>
@@ -90,17 +96,22 @@ function CollapsedGroup({ group, liveOutput }: { group: Group; liveOutput?: stri
   const total = group.calls.length
   const progress = doneN < total ? ` (${doneN}/${total})` : ''
   const anyRunning = doneN < total
+  // 折叠组的聚合色：任一失败 → 红，否则任一在跑 → 黄，全部完成 → 绿。
+  const headColor = aggregateStatusColor(group.calls.map(c => c.status))
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Text color="yellow">⏺  {group.name} ×{total}{progress}</Text>
-      {group.calls.map(c => {
-        const summary = c.status === 'running' ? '…' : (c.resultLines?.[0] ?? '')
-        return (
-          <Text key={c.toolUseId} color="gray" dimColor>
-            {'  '}⎿ {c.argText} → {summary}
-          </Text>
-        )
-      })}
+      <Text color={headColor} wrap="truncate-end">⏺  {group.name} ×{total}{progress}</Text>
+      {/* ⎿ 统一缩进到第 4 列，与非折叠的 ResultLines 对齐（trace 1：折叠 2 格/普通 4 格不一致）。 */}
+      <Box flexDirection="column" marginLeft={4}>
+        {group.calls.map(c => {
+          const summary = c.status === 'running' ? '…' : (c.resultLines?.[0] ?? '')
+          return (
+            <Text key={c.toolUseId} color="gray" dimColor wrap="truncate-end">
+              ⎿ {c.argText} → {summary}
+            </Text>
+          )
+        })}
+      </Box>
       {anyRunning && liveOutput ? <LiveOut text={liveOutput} /> : null}
     </Box>
   )

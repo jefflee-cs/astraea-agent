@@ -234,8 +234,10 @@ export const BashTool = buildTool({
     const MAX = 40
     const prefix = isError ? '[error]' : '[ok]'
     const header = `${prefix} (${lines.length} lines)`
-    const body = lines.slice(0, MAX).map(l => `  ${l}`)
-    if (lines.length > MAX) body.push(`  … (${lines.length - MAX} more lines)`)
+    // 不再自加缩进——结果体的对齐统一由 ResultLines 的悬挂缩进负责，
+    // 否则各工具各加各的前导空格，缩进就会参差（Glob 第 7 列、Bash 原来第 9 列）。
+    const body = lines.slice(0, MAX)
+    if (lines.length > MAX) body.push(`… (${lines.length - MAX} more lines)`)
     return [header, ...body]
   },
 

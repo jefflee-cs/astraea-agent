@@ -48,6 +48,10 @@ export function getToolRulesSection(enabledTools: Set<string>): string {
     ? ` - Before writing any file with the Write tool, first attempt to Read it. If Read fails (file does not exist), proceed with Write directly. If Read succeeds (file exists), write only after reading.`
     : null
 
+  const editGuidance = hasEdit
+    ? ` - Before editing a file with Edit, Read the WHOLE file first — not a 50-line slice with offset/limit. Edit refuses to run against a partially-read file (the write guard rejects it), so a partial Read forces a wasteful re-read and retry. Read it fully once, then edit.`
+    : null
+
   const lines = [
     '# Using your tools',
     ` - Do NOT use Bash when a dedicated tool is provided:`,
@@ -58,6 +62,7 @@ export function getToolRulesSection(enabledTools: Set<string>): string {
     askGuidance,
     vigilGuidance,
     writeGuidance,
+    editGuidance,
   ].filter((x): x is string => x !== null)
 
   return lines.join('\n')

@@ -43,6 +43,7 @@ import {
 import { loadMemoryIndex, buildRelevantMemoriesReminder } from './memory/inject'
 import { forceExtractMemories, maybeExtractMemories, noteExtractionTurn, clampExtractCursor } from './memory/extract'
 import { drainNotifications, hasPendingNotifications } from './services/notification-queue'
+import { drainInterjects, hasPendingInterjects } from './services/interject-queue'
 import { hasRunningAgents } from './services/agent-state'
 import { getTodos } from './services/todo-state'
 import {
@@ -83,7 +84,7 @@ import {
 // QueryEvent 是 StreamEvent 的超集：增加了 turn_start、tool_result、budget_stop
 export type QueryEvent =
   | StreamEvent
-  | { type: 'turn_start'; turn: number }
+  | { type: 'turn_start'; turn: number; flushPrev: boolean }
   | { type: 'tool_progress'; id: string; name: string; chunk: string }
   | { type: 'tool_result'; id: string; name: string; input: Record<string, unknown>; output: string; isError: boolean }
   | { type: 'max_turns_reached'; maxTurns: number }
@@ -240,9 +241,13 @@ async function* runQuery(
 
   // 反应式溢出兜底：每个 query() 调用最多触发一次，防止重试死循环。
   let reactiveCompacted = false
+  // max_tokens 续写时本轮文本要与下一轮无缝拼接，不能在轮边界被落盘切成两段气泡。
+  // 该标志让紧随其后的 turn_start 跳过 UI 的 flushAssistant；其余轮边界正常分段。
+  let suppressNextFlush = false
 
   while (true) {
-    yield { type: 'turn_start', turn: turnCount }
+    yield { type: 'turn_start', turn: turnCount, flushPrev: !suppressNextFlush }
+    suppressNextFlush = false
 
     // ── 0a. Microcompact（先轻后重：排在 autocompact 之前；仅主对话）──────────
     // time-based：离开 ≥ 阈值分钟后回来时，清空旧 tool 输出（保留骨架 + 最近 N 个）。
@@ -474,16 +479,23 @@ async function* runQuery(
         }
         messages = [...messages, assistantMessage, continueMsg]
         turnCount++
+        suppressNextFlush = true  // 续写紧接前文 → 下一轮 turn_start 不落盘，保持单气泡
         continue
       }
 
       const immediateNotifs = drainNotifications()
+      // 拾取点 A·纯文本轮：模型本轮无工具调用，把插队指令作为新一轮 user 消息注入并续跑。
+      // UI 侧靠 turn_start 事件先把本轮助手文本落盘，避免下一轮文本与本轮回复粘连（边界1）。
+      const immediateInterjects = drainInterjects()
 
-      if (immediateNotifs.length > 0) {
-        // Notifications arrived during this turn — feed them to the model
+      if (immediateNotifs.length > 0 || immediateInterjects.length > 0) {
+        // Notifications and/or user interjections arrived this turn — feed them to the model
         const waitMsg: UserMessage = {
           role: 'user',
-          content: immediateNotifs.map(n => ({ type: 'text' as const, text: n })),
+          content: [
+            ...immediateNotifs.map(n => ({ type: 'text' as const, text: n })),
+            ...immediateInterjects.map(buildInterjectBlock),
+          ],
         }
         messages = [...messages, assistantMessage, waitMsg]
         if (turnCount >= turnCap()) {
@@ -498,19 +510,28 @@ async function* runQuery(
       if (hasRunningAgents()) {
         // Agents still running but no notifications yet — poll without calling model
         // This avoids burning tokens while idle-waiting
-        while (hasRunningAgents() && !hasPendingNotifications() && !options.abortSignal?.aborted) {
+        while (
+          hasRunningAgents() &&
+          !hasPendingNotifications() &&
+          !hasPendingInterjects() &&
+          !options.abortSignal?.aborted
+        ) {
           await Bun.sleep(200)
         }
         if (options.abortSignal?.aborted) {
           yield { type: 'done', messages: [...messages, assistantMessage] }
           return
         }
-        // Re-enter the loop: notifications are now available (or agents finished)
+        // Re-enter the loop: notifications, interjections, or agent completion woke us
         const freshNotifs = drainNotifications()
-        if (freshNotifs.length > 0) {
+        const freshInterjects = drainInterjects()
+        if (freshNotifs.length > 0 || freshInterjects.length > 0) {
           const waitMsg: UserMessage = {
             role: 'user',
-            content: freshNotifs.map(n => ({ type: 'text' as const, text: n })),
+            content: [
+              ...freshNotifs.map(n => ({ type: 'text' as const, text: n })),
+              ...freshInterjects.map(buildInterjectBlock),
+            ],
           }
           messages = [...messages, assistantMessage, waitMsg]
           if (turnCount >= turnCap()) {
@@ -795,9 +816,15 @@ async function* runQuery(
       })
     }
 
-    // Build user message: tool_results + any pending task_notifications as text blocks
+    // Build user message: tool_results + any pending task_notifications + user interjections.
+    // 拾取点 A：工具批跑完、构建 tool_result message 时把队列里的插队指令追加为 text block。
+    // 这是协议上唯一合法的落点——tool_use/tool_result 必须紧邻，不能在两者间插独立 user 消息。
     const pendingNotifs = drainNotifications()
-    const extraTextBlocks: TextBlock[] = pendingNotifs.map(n => ({ type: 'text', text: n }))
+    const pendingInterjects = drainInterjects()
+    const extraTextBlocks: TextBlock[] = [
+      ...pendingNotifs.map(n => ({ type: 'text' as const, text: n })),
+      ...pendingInterjects.map(buildInterjectBlock),
+    ]
 
     // counsel 强制注入：本轮出现了因未问用户而被拦截的写/执行操作
     // → 在下一轮的 user message 里追加强制指令，模型没有退路，必须先调 AskUserQuestion
@@ -905,6 +932,20 @@ function buildContinuationDirective(): string {
     'Continue from exactly where you stopped. Do not repeat what you already wrote, do not restart, ' +
       'and do not apologize — just resume the next character as if there was no interruption.',
   ].join('\n')
+}
+
+// 用户在执行中途插队的指令 → 包成显式标签的 text block，与工具回报区分开。
+// 模型据此知道这是「用户在你干活时插话」，应作为更高优先级的指令/澄清并入当前工作。
+function buildInterjectBlock(text: string): TextBlock {
+  return {
+    type: 'text',
+    text:
+      '<user_interjection>\n' +
+      'The user sent this while you were working. Treat it as a higher-priority instruction ' +
+      'or clarification and fold it into what you are currently doing.\n\n' +
+      text +
+      '\n</user_interjection>',
+  }
 }
 
 // 工具调用被截断在中途时回传给模型的 tool_result。入参 JSON 残缺，工具未执行。

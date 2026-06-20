@@ -66,7 +66,12 @@ IMPORTANT: If this is an existing file, you MUST use the Read tool first to read
     const allLines = content.split('\n')
     const lineCount = allLines.length
     // 新建文件 = 纯添加 → 预览行整体走绿色背景带（注释灰、代码白）。
-    const preview = allLines.slice(0, 6).map(l => styleDiffLine(l, 'add', filePath))
+    // 行号沟与 Edit diff 一致：从 1 起、右对齐到本次预览最大行号的位数（CC 风格「前面有数字」）。
+    const shown = Math.min(6, lineCount)
+    const gutterW = String(shown).length
+    const preview = allLines
+      .slice(0, 6)
+      .map((l, i) => styleDiffLine(l, 'add', filePath, String(i + 1).padStart(gutterW)))
     const truncated = lineCount > 6 ? [...preview, `  … (${lineCount - 6} more lines)`] : preview
     return [`Written ${lineCount} lines → ${filePath}`, ...truncated]
   },

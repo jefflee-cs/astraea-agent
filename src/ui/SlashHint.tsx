@@ -90,6 +90,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     enterAction: 'execute',
   },
   {
+    name: '/stop',
+    summary: 'stop the current task and any running agents',
+    options: [],
+    enterAction: 'execute',
+  },
+  {
     name: '/clear',
     summary: 'clear conversation history',
     options: [],

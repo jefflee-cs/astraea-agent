@@ -93,7 +93,7 @@ export function StreamStatus({
   const meta: string[] = []
   if (tokens > 0) meta.push(`${fmtTokens(tokens)} tokens`)
   meta.push(`${elapsed}s`)
-  meta.push('esc to interrupt')
+  meta.push('esc · /stop to interrupt')
 
   return (
     <Text>

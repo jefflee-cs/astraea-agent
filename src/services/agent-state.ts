@@ -146,6 +146,19 @@ export function killAgentTask(agentId: string): boolean {
   return didKill
 }
 
+// 协作式中止所有运行中的子 Agent（abort + 标记 killed），但保留任务字典供 /agents 回看。
+// 供 /stop 使用：用户主动叫停时只停活，不抹历史。返回被中止的 agent 数量，便于 REPL 回执。
+// 区别于 clearAllTasks（后者还会清空整张任务字典，语义是"新会话从零开始"）。
+export function killAllRunningAgents(): number {
+  let killed = 0
+  for (const task of Object.values(_state.tasks)) {
+    if (task.kind === 'agent' && task.status === 'running') {
+      if (killAgentTask(task.id)) killed++
+    }
+  }
+  return killed
+}
+
 // 清空整个调度状态 —— 供 /clear 使用，让新会话从零开始。
 // 协作式取消所有仍在运行的子 Agent（abort 而非强杀），再丢弃整张任务字典。
 // 返回被中止的运行中 agent 数量，便于 REPL 给用户回执。

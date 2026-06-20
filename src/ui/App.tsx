@@ -30,12 +30,14 @@ import { onQuestion, answer } from '../tools/AskUserQuestionTool/bridge'
 import type { PendingQuestion } from '../tools/AskUserQuestionTool/bridge'
 import { setSessionSystemPrompt } from '../services/session-context'
 import { startUDSServer } from '../services/uds-server'
-import { getState, clearAllTasks } from '../services/agent-state'
+import { getState, clearAllTasks, killAllRunningAgents } from '../services/agent-state'
+import { enqueueInterject, clearInterjects } from '../services/interject-queue'
 import type { AgentTaskState } from '../services/agent-state'
 import { clearTodos, getAllNamespaces } from '../services/todo-state'
 import { renderMarkdown } from '../utils/markdown'
 import { readClipboard } from '../utils/clipboard'
 import { clampLineWidth, safeWinPreview } from '../utils/termWidth'
+import { displayPath } from '../utils/displayPath'
 import { getMode, setMode } from '../state/sessionMode'
 import type { SessionMode } from '../state/sessionMode'
 import { compactConversation, estimateTokens } from '../services/compact/compact'
@@ -76,6 +78,7 @@ import { VigilPanel, VIGIL_ACTIONS } from './VigilPanel'
 import { SlashHint, allSlashCommands, matchSlashCommands } from './SlashHint'
 import { ModeSwitchBanner, ModeInputFrame } from './ModeBanner'
 import { ToolBatch, type ToolCall } from './ToolBatch'
+import { STATUS_COLOR, type AgentStatus } from './theme'
 import { TodoPanel } from './TodoPanel'
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
@@ -86,6 +89,9 @@ import { abortWechatRead, WechatReadTool } from '../tools/WechatReadTool'
 const VIGIL_RESULT_DIR = join(homedir(), '.astraea', 'task-results')
 
 const INDIGO = '#6A5ACD'
+// Astraea 的前导星 —— turn 头与工具前叙述句共用，单点可换形/换大小。
+// 备选（由小到大/由细到粗）：✦ ✶ ✷ ✸ ✹ ✺ ❂ ★
+const STAR = '✸'
 const DEEP = '#1A0F40'   // dark navy-purple —— 用户消息底色（与 AstraeaSprite 同款品牌色）
 const VERSION = pkg.version   // 单一来源：版本号只在 package.json 维护，UI 自动跟随
 
@@ -99,16 +105,21 @@ const IS_WIN = platform() === 'win32'
 const CLEAR_TERMINAL = IS_WIN ? '\x1b[2J\x1b[0f' : '\x1b[2J\x1b[3J\x1b[H'
 
 function formatToolArg(name: string, input: Record<string, unknown>): string {
+  // 工具头一律单行展示，最终交给 wrap='truncate-end' 的 <Text>，名字永不被从中间拆开。
+  // 文件类工具显示 cwd 相对路径（cwd 外用绝对），不再把 old_string/new_string 这类长参数
+  // 灌进工具头（trace 4：Edit 头里 old_string 被截成 "\n\nA…" 既丑又无信息）。
   const MAX = 120
   let arg: string
   switch (name) {
     case 'Read':
     case 'Write':
-      arg = String(input['file_path'] ?? JSON.stringify(input))
+    case 'Edit':
+      arg = input['file_path'] ? displayPath(String(input['file_path'])) : JSON.stringify(input)
       break
     case 'Bash':
     case 'PowerShell':
-      arg = String(input['command'] ?? JSON.stringify(input))
+      // 命令里的换行折叠成空格，避免多行命令把工具头撑成多行。
+      arg = String(input['command'] ?? JSON.stringify(input)).replace(/\s*\n\s*/g, ' ')
       break
     default: {
       const raw = JSON.stringify(input)
@@ -162,10 +173,11 @@ interface HistoryEntry {
   id: string
   // 路径 A 重构（Stage 1）：tool_use/tool_result 两类合并为一条 'tools' 批（calls 承载，
   // 逐调用配对 + 同类折叠由 <ToolBatch> 渲染）。文本/banner 角色保持不变。
-  role: 'welcome' | 'user' | 'assistant' | 'mode_banner' | 'skill_banner' | 'tools'
+  role: 'welcome' | 'user' | 'assistant' | 'mode_banner' | 'skill_banner' | 'tools' | 'status'
   text: string
   lines?: string[]       // 多行结果显示（历史遗留字段，'tools' 不用）
   calls?: ToolCall[]     // 'tools' 行专用：一个已落盘的工具批
+  status?: AgentStatus   // 'status' 行专用：按状态色矩阵上色（success 绿 / pending 黄 / error 红）
 }
 
 // 工具结果 → 展示行：优先工具自带 renderResult，否则截断预览。live 流与 /resume 复用同一逻辑。
@@ -646,6 +658,13 @@ export function App() {
           model: runOpts?.model,  // skill frontmatter 模型覆盖（per-query）
         })) {
           switch (event.type) {
+            case 'turn_start':
+              // 轮边界落盘上一轮助手文本，按 turn 分段展示。对纯文本轮插队尤为关键：
+              // 注入插队后续跑的下一轮文本不会与本轮回复粘连（interject 边界1）。
+              // flushPrev=false 仅出现在 max_tokens 续写：此时要无缝拼接，不可切成两段气泡。
+              if (event.flushPrev) flushAssistant()
+              break
+
             case 'text':
               // 工具批结束、叙述恢复 → 先把在途批落盘，保证时序：…文本→工具批→文本…
               if (liveToolsRef.current.length > 0) commitLiveTools()
@@ -880,7 +899,7 @@ export function App() {
           commitLiveTools()   // 报错前已跑完的工具批落盘，便于定位失败上下文
           setHistory(prev => [
             ...prev,
-            { id: String(entryIdRef.current++), role: 'assistant', text: `[Error: ${errMsg}]` },
+            { id: String(entryIdRef.current++), role: 'status', status: 'error', text: `■ Error: ${errMsg}` },
           ])
           setStreamingText('')
           setIsStreaming(false)
@@ -893,6 +912,42 @@ export function App() {
     },
     [systemPrompt],
   )
+
+  // ── /stop —— 一键叫停 ────────────────────────────────────────────────────────
+  // 取消正在进行的本轮流式查询 + 协作式中止所有运行中的子 Agent。
+  // 与 ESC 等价（ESC 仅中断当前流），但 /stop 还会一并停掉后台 agent，且能在任意输入态触发
+  // （ESC 在非流式时另有清空输入等语义）。落一行红色 status 回执（中断 = 红）。
+  const stopActiveWork = useCallback(() => {
+    const wasStreaming = isStreaming && !!abortControllerRef.current
+    if (wasStreaming) {
+      abortControllerRef.current?.abort()
+      clearInterjects()  // 叫停时丢弃未拾取的插队，与 ESC 语义一致
+      setIsStreaming(false)
+      setStreamingText('')
+      setActiveTool(null)
+      setLiveOutput('')
+      commitLiveTools()  // 已跑完的工具批先落盘，排在 /stop 回执之前（顺序正确）
+    }
+    const killed = killAllRunningAgents()
+    const parts: string[] = []
+    if (wasStreaming) parts.push('current turn cancelled')
+    if (killed > 0) parts.push(`${killed} running agent${killed === 1 ? '' : 's'} aborted`)
+    if (parts.length > 0) {
+      setHistory(prev => [...prev, {
+        id: String(entryIdRef.current++),
+        role: 'status',
+        status: 'error',
+        text: `■ /stop — ${parts.join(' · ')}.`,
+      }])
+    } else {
+      setHistory(prev => [...prev, {
+        id: String(entryIdRef.current++),
+        role: 'status',
+        status: 'pending',
+        text: '◌ /stop — nothing is running.',
+      }])
+    }
+  }, [isStreaming, commitLiveTools])
 
   const handleSubmit = useCallback(
     async (text: string) => {
@@ -919,6 +974,13 @@ export function App() {
       // ── 执行中也允许随时切换模式，立即对下一次工具调用生效 ─────────────────
       // （query.ts 每批工具前重读 getMode()）。input box 不锁定，不显示 "wait for astraea"。
       if (isStreaming) {
+        // /stop 在执行中也必须生效 —— 这正是它的主战场（叫停跑飞的任务）。
+        if (trimmed === '/stop') {
+          setInputValue('')
+          historyIndexRef.current = -1
+          stopActiveWork()
+          return
+        }
         const liveModeMatch = trimmed.match(/^\/mode\s+(default|orbit|cruise|forge|counsel)$/)
         if (liveModeMatch) {
           const newMode = liveModeMatch[1] as SessionMode
@@ -936,8 +998,20 @@ export function App() {
           const currentIdx = MODE_OPTIONS.findIndex(o => o.value === getMode())
           setModeSelectorIndex(currentIdx >= 0 ? currentIdx : 0)
           setPendingModeSelect(true)
+        } else if (!trimmed.startsWith('/')) {
+          // ── interject ───────────────────────────────────────────────────────
+          // 执行中的非斜杠输入 = 插队指令：入队，query.ts 在下一轮工具批/纯文本轮末尾
+          // 自动拾取并随上下文送入模型（延迟 ≤ 一轮，不打断在飞的流或工具）。
+          // 立刻回显为 user 行，给用户「已收到」反馈；ESC 仍是即时叫停的快速通道。
+          setInputValue('')
+          historyIndexRef.current = -1
+          enqueueInterject(trimmed)
+          setHistory(prev => [
+            ...prev,
+            { id: String(entryIdRef.current++), role: 'user', text: trimmed },
+          ])
         }
-        // 其它输入在执行中忽略（不开新会话），保留已输入文本供稍后提交
+        // 其它斜杠命令在执行中忽略（仅 /mode、/stop 生效），保留已输入文本供稍后提交
         return
       }
       if (!systemPrompt) return  // still loading
@@ -960,6 +1034,14 @@ export function App() {
           }
           // cmd.name === trimmed 的 execute/panel：继续走下方既有精确路由
         }
+      }
+
+      // /stop —— 空闲态：没有在跑的流式查询，但可能有后台子 Agent 仍在运行 → 一并停掉。
+      if (trimmed === '/stop') {
+        setInputValue('')
+        historyIndexRef.current = -1
+        stopActiveWork()
+        return
       }
 
       if (trimmed === '/login') {
@@ -1426,7 +1508,7 @@ export function App() {
       // 展开粘贴占位符 → 真实内容喂给模型；history 仍显示占位符（trimmed）
       await runConversation(expandPastes(trimmed), trimmed)
     },
-    [isStreaming, systemPrompt, pendingQuestion, pendingModeSelect, pendingVigilPanel, questionOptionIndex, runConversation],
+    [isStreaming, systemPrompt, pendingQuestion, pendingModeSelect, pendingVigilPanel, questionOptionIndex, runConversation, stopActiveWork],
   )
 
   const handleLoginDone = useCallback(async (result: LoginResult | null) => {
@@ -1733,14 +1815,15 @@ export function App() {
       // Priority 1: ESC while streaming → cancel the AI request
       if (isStreaming && !pendingQuestion) {
         abortControllerRef.current?.abort()
+        clearInterjects()  // 叫停 = 连未拾取的插队一并丢弃，不让它泄漏到下一次运行
         setIsStreaming(false)
         setStreamingText('')
         setActiveTool(null)
         setLiveOutput('')
-        commitLiveTools()  // 已跑完的工具批先落盘，排在 _[cancelled]_ 之前（顺序正确）
+        commitLiveTools()  // 已跑完的工具批先落盘，排在中断回执之前（顺序正确）
         setHistory(prev => [
           ...prev,
-          { id: String(entryIdRef.current++), role: 'assistant', text: '_[cancelled]_' },
+          { id: String(entryIdRef.current++), role: 'status', status: 'error', text: '■ cancelled' },
         ])
         return
       }
@@ -1858,7 +1941,7 @@ export function App() {
   const inputPlaceholder = pendingQuestion
     ? 'Type your answer… (Esc to skip)'
     : isStreaming
-      ? 'Astraea is working… /mode to switch · Esc to cancel'
+      ? 'Astraea is working… type to interject · Esc to cancel'
       : systemPrompt === null
         ? 'Initializing...'
         : 'Message Astraea… (Ctrl+C to exit)'
@@ -1868,7 +1951,7 @@ export function App() {
   return (
     <Box flexDirection="column">
       <Static key={staticEpoch} items={history}>
-        {entry => {
+        {(entry, index) => {
           if (entry.role === 'welcome') {
             return (
               <WelcomePanel
@@ -1878,6 +1961,14 @@ export function App() {
                 model={modelName}
                 tools={toolNames}
               />
+            )
+          }
+          if (entry.role === 'status') {
+            // 状态行：按状态色矩阵整行上色（success 绿 / pending 黄 / error 红）。纯文本，不走 markdown。
+            return (
+              <Box key={entry.id} marginBottom={1}>
+                <Text color={STATUS_COLOR[entry.status ?? 'pending']} wrap="truncate-end">{entry.text}</Text>
+              </Box>
             )
           }
           if (entry.role === 'mode_banner') {
@@ -1909,10 +2000,27 @@ export function App() {
             )
           }
           // 其余（assistant 及以 assistant 角色落盘的系统提示）走 markdown 渲染。
+          // 一个 turn 会被拆成「文本→工具批→文本→…」多条 assistant/tools 条目，但它们同属
+          // Astraea 的一次发言。仅在 turn 起点（上一条不是 assistant/tools）打一次 ✦ Astraea，
+          // 其余续接条目不再重复刷头（eval Item 6：✦ Astraea 只该展示一次）。
+          const prevRole = index > 0 ? history[index - 1]?.role : undefined
+          const showHeader = prevRole !== 'assistant' && prevRole !== 'tools'
+          // turn 起点打全头「✦ Astraea」独占一行、正文在其下；续接的工具前叙述句则把
+          // 一颗靛蓝 ✦ 与该句正文排在同一行（行内前导星，折行走悬挂缩进）。
+          if (showHeader) {
+            return (
+              <Box key={entry.id} flexDirection="column" marginBottom={1}>
+                <Text bold color={INDIGO}>{STAR} Astraea</Text>
+                <Text>{renderMarkdown(entry.text)}</Text>
+              </Box>
+            )
+          }
           return (
-            <Box key={entry.id} flexDirection="column" marginBottom={1}>
-              <Text bold color={INDIGO}>✦ Astraea</Text>
-              <Text>{renderMarkdown(entry.text)}</Text>
+            <Box key={entry.id} flexDirection="row" marginBottom={1}>
+              <Text bold color={INDIGO}>{STAR} </Text>
+              <Box flexDirection="column" flexGrow={1}>
+                <Text>{renderMarkdown(entry.text)}</Text>
+              </Box>
             </Box>
           )
         }}
@@ -1921,25 +2029,49 @@ export function App() {
       {/* 启动动画 —— 仅 booting 期间在 live 区独占顶部，结束后由 handleBootDone 收起。 */}
       {booting && <AstraeaIntro onDone={handleBootDone} />}
 
-      {isStreaming && (
+      {isStreaming && (() => {
+        // live 区与 Static 同一套去重逻辑：若本 turn 已经在前面的 assistant/tools 条目打过
+        // ✦ Astraea，续接的流式文本就不再重复刷头（eval Item 6）。
+        const lastRole = history.length > 0 ? history[history.length - 1]?.role : undefined
+        const showHeader = lastRole !== 'assistant' && lastRole !== 'tools'
+        return (
         <Box flexDirection="column" marginBottom={1}>
-          <Text bold color={INDIGO}>✦ Astraea</Text>
-          {streamingText && (() => {
-            // 实时预览只渲染尾部若干行，把帧高封顶 → 避免越界擦除把页脚/输入框盖住。
-            // 完整文本在本轮结束时整段落盘进 Static（见 finalText），故此处截断只影响"进行中"预览。
-            const maxLines = Math.max(8, (stdout?.rows ?? 24) - 14)
-            // Windows：Ink 擦除按"换行符行数"算，但超宽行（尤其中文全角=2 宽）会被终端
-            // 自动折行成多物理行，导致擦不干净、✦ Astraea 与正文一层层重影。这里把预览
-            // 截成"每行不超宽的纯文本"，让逻辑行数==物理行数。富文本完整版仍进 <Static>。
-            if (IS_WIN) {
-              const cols = Math.max(1, (stdout?.columns ?? 80) - 1)
-              return <Text>{safeWinPreview(streamingText, cols, maxLines)}</Text>
+          {(() => {
+            // 流式正文预览（落盘前的"进行中"截断版；完整版本轮结束进 <Static>）。
+            const previewEl = streamingText ? (() => {
+              // 实时预览只渲染尾部若干行，把帧高封顶 → 避免越界擦除把页脚/输入框盖住。
+              const maxLines = Math.max(8, (stdout?.rows ?? 24) - 14)
+              // Windows：Ink 擦除按"换行符行数"算，但超宽行（尤其中文全角=2 宽）会被终端
+              // 自动折行成多物理行，导致擦不干净、星与正文一层层重影。这里把预览
+              // 截成"每行不超宽的纯文本"，让逻辑行数==物理行数。富文本完整版仍进 <Static>。
+              if (IS_WIN) {
+                const cols = Math.max(1, (stdout?.columns ?? 80) - 1)
+                return <Text>{safeWinPreview(streamingText, cols, maxLines)}</Text>
+              }
+              const lines = streamingText.split('\n')
+              const preview = lines.length <= maxLines
+                ? streamingText
+                : '⋯\n' + lines.slice(-maxLines).join('\n')
+              return <Text>{renderMarkdown(preview)}</Text>
+            })() : null
+            // turn 起点：「STAR Astraea」独占一行、正文在下。
+            if (showHeader) {
+              return (
+                <>
+                  <Text bold color={INDIGO}>{STAR} Astraea</Text>
+                  {previewEl}
+                </>
+              )
             }
-            const lines = streamingText.split('\n')
-            const preview = lines.length <= maxLines
-              ? streamingText
-              : '⋯\n' + lines.slice(-maxLines).join('\n')
-            return <Text>{renderMarkdown(preview)}</Text>
+            // 续接的工具前叙述句：星与正文同一行（行内前导星，折行悬挂缩进）。
+            // 纯工具续接（无流式正文）时不画孤星。
+            if (!previewEl) return null
+            return (
+              <Box flexDirection="row">
+                <Text bold color={INDIGO}>{STAR} </Text>
+                <Box flexDirection="column" flexGrow={1}>{previewEl}</Box>
+              </Box>
+            )
           })()}
           {/* 在途工具批：逐调用配对 + 同类折叠，liveOutput 挂在 running 调用下。 */}
           {liveTools.length > 0 && <ToolBatch calls={liveTools} liveOutput={liveOutput} />}
@@ -1961,7 +2093,8 @@ export function App() {
               解决"跑到一半停住、不知是否还在运行"的问题。置于 live frame 底部。 */}
           <StreamStatus startTime={streamStart} tokens={liveTokens} />
         </Box>
-      )}
+        )
+      })()}
 
       {/* ◎ /goal active 指示器 —— goalTick 驱动每秒刷新 */}
       {(() => {
