@@ -6,6 +6,8 @@ import { config } from '../config'
 import type { Message, StreamEvent } from '../types/message'
 import type { StreamOptions } from './anthropic'
 import type { ToolSchema } from '../tools/Tool'
+import { resolveAppliedEffort, openaiReasoningParam } from './reasoningEffort'
+import { mapOpenAIUsage } from './usageAccounting'
 
 let _openaiClient: OpenAI | null = null
 
@@ -84,6 +86,7 @@ export async function* streamMessageOpenAI(
   const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>()
   let inputTokens = 0
   let outputTokens = 0
+  let cacheReadTokens = 0   // prompt_tokens 含命中缓存，需拆出按缓存价计（见 usageAccounting）
   let truncated = false   // finish_reason === 'length' → 撞输出上限被截断
   let finishReason: string | null = null
 
@@ -104,10 +107,15 @@ export async function* streamMessageOpenAI(
     ? { max_completion_tokens: options.maxTokens ?? config.openai.maxTokens }
     : { max_tokens: options.maxTokens ?? config.openai.maxTokens }
 
-  // reasoning_effort（none|low|medium|high|xhigh）仅 gpt-5.x / o 系列接受，且需用户显式配置
-  const reasoningParam = reasoning && config.openai.reasoningEffort
-    ? { reasoning_effort: config.openai.reasoningEffort as 'low' | 'medium' | 'high' }
-    : {}
+  // reasoning_effort：仅 gpt-5.x / o 系列接受。优先级 /reason 会话设置 > env > 旧静态配置兜底。
+  // resolveAppliedEffort 已含 env(ASTRAEA_REASONING_EFFORT) > 会话 链；为兼容旧 OPENAI_REASONING_EFFORT
+  // 配置，二者皆空时回落到 config.openai.reasoningEffort。
+  const applied = resolveAppliedEffort()
+  const reasoningParam = applied
+    ? openaiReasoningParam(effectiveModel, applied)
+    : reasoning && config.openai.reasoningEffort
+      ? { reasoning_effort: config.openai.reasoningEffort as 'low' | 'medium' | 'high' }
+      : {}
 
   const stream = await client.chat.completions.create({
     model: effectiveModel,
@@ -123,8 +131,10 @@ export async function* streamMessageOpenAI(
     const choice = chunk.choices[0]
 
     if (chunk.usage) {
-      inputTokens = chunk.usage.prompt_tokens
-      outputTokens = chunk.usage.completion_tokens
+      const m = mapOpenAIUsage(chunk.usage)
+      inputTokens = m.input
+      outputTokens = m.output
+      cacheReadTokens = m.cacheRead
     }
 
     if (!choice) continue
@@ -164,7 +174,11 @@ export async function* streamMessageOpenAI(
 
   yield {
     type: 'message_stop',
-    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    usage: {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_read_input_tokens: cacheReadTokens,
+    },
     stopReason: truncated ? 'max_tokens'
       : finishReason === 'tool_calls' ? 'tool_use'
       : finishReason === 'stop' ? 'end_turn'

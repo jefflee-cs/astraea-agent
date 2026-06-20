@@ -66,6 +66,18 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     enterAction: 'execute',
   },
   {
+    name: '/reason',
+    summary: 'set reasoning effort',
+    options: ['low', 'medium', 'high', 'max', 'auto'],
+    enterAction: 'complete',
+  },
+  {
+    name: '/usage',
+    summary: 'show session token usage & cost',
+    options: [],
+    enterAction: 'execute',
+  },
+  {
     name: '/mcp',
     summary: 'show MCP server status',
     options: [],
@@ -105,13 +117,19 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 
 const INDIGO = '#6A5ACD'
 
-// Skill 命令派生为 slash 候选（统一命令表，实现文档 §1.2）：prompt 类 + user-invocable
-// + 非内置（避免与上方硬编码内置重复）。有 argument-hint → complete（补全等输参），否则 execute。
-function skillSlashCommands(): SlashCommand[] {
+// 从统一命令表派生 slash 候选（实现文档 §1.2），覆盖两类：
+//   · 用户/项目/插件 skill（prompt 类）——本就不在上方硬编码表里；
+//   · 内置 local 命令（如 /usage /reason）——避免"新增内置忘了同步硬编码表"这个坑。
+// 注意：local-jsx 内置（/mode /vigil 等需 panel 语义）仍由上方 SLASH_COMMANDS 精确声明，不在此派生。
+// 有 argument-hint → complete（补全等输参），否则 execute。上方硬编码同名项优先（见 allSlashCommands 去重）。
+function registryDerivedSlashCommands(): SlashCommand[] {
   try {
     const { getCommands } = require('../commands/registry') as typeof import('../commands/registry')
     return getCommands()
-      .filter(c => c.type === 'prompt' && c.userInvocable && c.source !== 'builtin')
+      .filter(c => c.userInvocable && !c.hidden && (
+        (c.type === 'prompt' && c.source !== 'builtin') ||   // skill
+        (c.type === 'local' && c.source === 'builtin')        // 内置 local（自动纳入，防遗漏）
+      ))
       .map(c => ({
         name: `/${c.name}`,
         summary: c.description,
@@ -123,9 +141,11 @@ function skillSlashCommands(): SlashCommand[] {
   }
 }
 
-/** 内置 + skill 合并候选（skill 接在内置之后）。 */
+/** 硬编码内置 + 派生候选合并；同名以硬编码优先（它带更友好的 options/enterAction）。 */
 export function allSlashCommands(): SlashCommand[] {
-  return [...SLASH_COMMANDS, ...skillSlashCommands()]
+  const hardcoded = new Set(SLASH_COMMANDS.map(c => c.name))
+  const derived = registryDerivedSlashCommands().filter(c => !hardcoded.has(c.name))
+  return [...SLASH_COMMANDS, ...derived]
 }
 
 // 前缀匹配 + 声明顺序；input === '/' 时列出全部。精确匹配也保留（单一路径）。

@@ -7,6 +7,8 @@ import { config } from '../config'
 import type { Message, StreamEvent } from '../types/message'
 import type { StreamOptions } from './anthropic'
 import type { ToolSchema } from '../tools/Tool'
+import { mapDeepSeekUsage } from './usageAccounting'
+import { resolveAppliedEffort, deepseekEffectiveModel, deepseekReasoningDirective } from './reasoningEffort'
 
 function createClient(): OpenAI {
   return new OpenAI({
@@ -21,10 +23,18 @@ export async function* streamMessageDeepSeek(
 ): AsyncGenerator<StreamEvent> {
   const client = createClient()
 
+  // /reason → DeepSeek 定制：reasoner 档换模型 + 注入动态 prompt 指令（见 reasoningEffort.ts）。
+  const applied = resolveAppliedEffort()
+  const configuredModel = options.model ?? config.deepseek.model
+  const effectiveModel = deepseekEffectiveModel(applied, configuredModel)
+  const directive = deepseekReasoningDirective(applied)
+
   const chatMessages: OpenAI.Chat.ChatCompletionMessageParam[] = []
 
-  if (options.system) {
-    chatMessages.push({ role: 'system', content: options.system })
+  // 思考深度指令拼进 system（已有 system 则追加一行）。
+  const systemText = [options.system, directive].filter(Boolean).join('\n\n')
+  if (systemText) {
+    chatMessages.push({ role: 'system', content: systemText })
   }
 
   for (const msg of messages) {
@@ -62,6 +72,7 @@ export async function* streamMessageDeepSeek(
   const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>()
   let inputTokens = 0
   let outputTokens = 0
+  let cacheReadTokens = 0   // prompt_tokens 含命中缓存，需拆出按缓存价计（见 usageAccounting）
   let truncated = false   // finish_reason === 'length' → 撞输出上限被截断
   let finishReason: string | null = null
 
@@ -71,8 +82,9 @@ export async function* streamMessageDeepSeek(
       function: { name: t.name, description: t.description, parameters: t.input_schema },
     }))
 
+  // max_tokens 不随 /reason 变：DeepSeek 的 CoT 在独立 reasoning_content、不占此预算（见 reasoningEffort.ts）。
   const stream = await client.chat.completions.create({
-    model: options.model ?? config.deepseek.model,
+    model: effectiveModel,
     max_tokens: options.maxTokens ?? config.deepseek.maxTokens,
     messages: chatMessages,
     stream: true,
@@ -84,8 +96,10 @@ export async function* streamMessageDeepSeek(
     const choice = chunk.choices[0]
 
     if (chunk.usage) {
-      inputTokens = chunk.usage.prompt_tokens
-      outputTokens = chunk.usage.completion_tokens
+      const m = mapDeepSeekUsage(chunk.usage)
+      inputTokens = m.input
+      outputTokens = m.output
+      cacheReadTokens = m.cacheRead
     }
 
     if (!choice) continue
@@ -123,7 +137,11 @@ export async function* streamMessageDeepSeek(
 
   yield {
     type: 'message_stop',
-    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    usage: {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_read_input_tokens: cacheReadTokens,
+    },
     stopReason: truncated ? 'max_tokens'
       : finishReason === 'tool_calls' ? 'tool_use'
       : finishReason === 'stop' ? 'end_turn'

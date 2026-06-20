@@ -44,6 +44,7 @@ import { loadMemoryIndex, buildRelevantMemoriesReminder } from './memory/inject'
 import { forceExtractMemories, maybeExtractMemories, noteExtractionTurn, clampExtractCursor } from './memory/extract'
 import { drainNotifications, hasPendingNotifications } from './services/notification-queue'
 import { hasRunningAgents } from './services/agent-state'
+import { getTodos } from './services/todo-state'
 import {
   getActiveGoal,
   recordGoalEvaluation,
@@ -212,6 +213,8 @@ async function* runQuery(
   // 对话数组保持干净（剥掉任何历史遗留的 reminder）；reminder 仅在 streamMessage 调用时前置。
   let messages: (UserMessage | AssistantMessage)[] = stripReminders([...initialMessages])
   let turnCount = 1
+  // Todo 收尾 Stop-hook 只提醒一次，避免模型反复留尾导致死循环
+  let todoNudged = false
 
   // 定稿 #10/#12/#13：召回 ≤5 条相关记忆，拼到用户消息尾部（逐消息变，远离缓存前缀）。
   // 每 query 调用跑一次（= 每条用户消息）；optional，失败/零记忆返回 null 不阻塞。
@@ -562,6 +565,35 @@ async function* runQuery(
           const directive: UserMessage = {
             role: 'user',
             content: [{ type: 'text', text: buildGoalDirective(goal.condition, decision.reason) }],
+          }
+          messages = [...messages, assistantMessage, directive]
+          turnCount++
+          continue
+        }
+      }
+
+      // ── Todo 收尾 Stop-hook ──────────────────────────────────────────────
+      // 真正停止点：模型给最终回复、无 tool call。若 todo 列表里仍有未完成项
+      // （常见根因：干完活忘了发收尾 TodoWrite），注入一次提醒并再跑一轮，逼模型
+      // 把状态对齐——标 completed 让「所有任务已完成」可靠触发，或明确告诉用户还剩什么。
+      // 仅主对话（compactionEnabled）生效，仅提醒一次，受 turnCap 兜底，绝不死循环。
+      if (compactionEnabled && !todoNudged) {
+        const open = getTodos('main').filter(t => t.status !== 'completed')
+        if (open.length > 0 && turnCount < turnCap()) {
+          todoNudged = true
+          const list = open.map(t => `  - [${t.status}] ${t.content}`).join('\n')
+          const directive: UserMessage = {
+            role: 'user',
+            content: [{
+              type: 'text',
+              text:
+                `<system-reminder>\nYou are ending your turn, but your todo list still has ` +
+                `${open.length} unfinished task(s):\n${list}\n\n` +
+                `If the work is genuinely done, call TodoWrite to mark them completed so the user ` +
+                `gets a clear completion signal. If a task is truly not done, leave it as-is and ` +
+                `tell the user explicitly what remains — never silently abandon an in_progress task.\n` +
+                `</system-reminder>`,
+            }],
           }
           messages = [...messages, assistantMessage, directive]
           turnCount++

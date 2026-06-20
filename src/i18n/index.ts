@@ -115,6 +115,8 @@ const EN: Dict = {
   helpSkills: 'Skills',
   // 杂项
   todoAllDone: 'All tasks complete',
+  todoPaused: 'paused — {n} task(s) still open',
+  todoAllDoneN: 'All {n} task(s) complete',
   turnLimit: '⚠ Reached the {n}-turn limit; the task may be unfinished. Press Enter or say "continue" to keep going.',
 }
 
@@ -167,6 +169,8 @@ const ZH: Dict = {
   helpCommands: '命令',
   helpSkills: '技能',
   todoAllDone: '所有任务已完成',
+  todoPaused: '已暂停 — 还有 {n} 个任务未完成',
+  todoAllDoneN: '已完成全部 {n} 个任务',
   turnLimit: '⚠ 已达单轮上限 {n} 轮，任务可能未完成。直接回车或补一句"继续"即可接着跑。',
 }
 
@@ -209,6 +213,8 @@ const DE: Dict = {
   helpCommands: 'Befehle',
   helpSkills: 'Skills',
   todoAllDone: 'Alle Aufgaben erledigt',
+  todoPaused: 'pausiert — {n} Aufgabe(n) noch offen',
+  todoAllDoneN: 'Alle {n} Aufgabe(n) erledigt',
   turnLimit: '⚠ {n}-Runden-Limit erreicht; die Aufgabe ist evtl. unvollständig. Enter drücken oder „weiter" sagen, um fortzufahren.',
 }
 
@@ -251,6 +257,8 @@ const FR: Dict = {
   helpCommands: 'Commandes',
   helpSkills: 'Compétences',
   todoAllDone: 'Toutes les tâches terminées',
+  todoPaused: 'en pause — {n} tâche(s) encore ouverte(s)',
+  todoAllDoneN: 'Les {n} tâche(s) terminées',
   turnLimit: '⚠ Limite de {n} tours atteinte ; la tâche est peut-être inachevée. Appuyez sur Entrée ou dites « continuer ».',
 }
 
@@ -293,6 +301,8 @@ const ES: Dict = {
   helpCommands: 'Comandos',
   helpSkills: 'Habilidades',
   todoAllDone: 'Todas las tareas completadas',
+  todoPaused: 'en pausa — {n} tarea(s) aún abierta(s)',
+  todoAllDoneN: 'Las {n} tarea(s) completadas',
   turnLimit: '⚠ Se alcanzó el límite de {n} turnos; la tarea puede estar incompleta. Pulsa Enter o di «continuar».',
 }
 
@@ -335,6 +345,8 @@ const KO: Dict = {
   helpCommands: '명령어',
   helpSkills: '스킬',
   todoAllDone: '모든 작업 완료',
+  todoPaused: '일시중지됨 — {n}개 작업 미완료',
+  todoAllDoneN: '{n}개 작업 모두 완료',
   turnLimit: '⚠ {n}턴 한도에 도달했습니다. 작업이 미완료일 수 있습니다. Enter를 누르거나 "계속"이라고 입력하세요.',
 }
 

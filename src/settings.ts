@@ -64,6 +64,8 @@ export interface AstraeaSettings {
   cleanupPeriodDays?: number
   /** 界面与回复语言（/language 显式选择时写入）。en|de|fr|es|zh|ko；未设置则启动按系统 locale 探测。 */
   language?: string
+  /** 推理强度（/reason 持久化）。low|medium|high；max 仅会话不落盘。启动时水合进会话单例。 */
+  reasoningEffort?: string
   /**
    * 环境变量注入：启动时由 config.ts 灌进 process.env（如 PHOENIX_ENABLED）。
    * 优先级：shell > settings.json > 项目 .env > 全局 .env（不覆盖 shell 已设的值）。

@@ -8,6 +8,7 @@ import { toAPIMessage } from '../types/message'
 import type { ToolSchema } from '../tools/Tool'
 import { normalizeMessagesForAPI } from '../utils/messages'
 import { getClient } from './client'
+import { resolveAppliedEffort, anthropicThinkingParam } from './reasoningEffort'
 
 export interface StreamOptions {
   system?: string
@@ -36,11 +37,17 @@ export async function* streamMessageAnthropic(
       : options.system
     : undefined
 
+  // /reason → extended thinking。预算自动夹在 max_tokens 之下，不支持 thinking 的模型自动略过。
+  const effModel = options.model ?? config.anthropic.model
+  const effMaxTokens = options.maxTokens ?? config.anthropic.maxTokens
+  const thinkingParam = anthropicThinkingParam(effModel, resolveAppliedEffort(), effMaxTokens)
+
   const stream = client.messages.stream({
-    model: options.model ?? config.anthropic.model,
-    max_tokens: options.maxTokens ?? config.anthropic.maxTokens,
+    model: effModel,
+    max_tokens: effMaxTokens,
     system: system as string | undefined,
     messages: apiMessages,
+    ...thinkingParam,
     ...(options.tools?.length
       ? {
           tools: options.tools as Parameters<typeof client.messages.stream>[0]['tools'],

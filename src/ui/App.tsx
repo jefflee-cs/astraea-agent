@@ -386,6 +386,7 @@ export function App() {
   // MCP 启动期连接（实现文档 §1.7）：连上后工具进 getMcpTools()，下一轮 query 即可见。
   // 失败容忍（registry 记状态供 /mcp 面板展示）；不阻塞 UI。
   useEffect(() => {
+    void import('../commands/reason').then(m => m.hydrateReasoningEffort())  // 水合上次 /reason 落盘的等级
     initPlugins()  // 先注册插件 skill/mcp 吸管，再连 MCP（含插件 server）
     void initMcp().then(() => {
       const failed = getMcpStatus().filter(s => s.state === 'failed')
@@ -2094,7 +2095,15 @@ export function App() {
         </Box>
       )}
 
-      <TodoPanel />
+      <TodoPanel
+        idle={!isStreaming}
+        onComplete={(n) =>
+          setHistory(prev => [
+            ...prev,
+            { id: String(entryIdRef.current++), role: 'assistant', text: `✓  ${t('todoAllDoneN', { n })}` },
+          ])
+        }
+      />
 
       {!showLogin && !showInternet && !showLanguage && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && (
         <ModeInputFrame mode={sessionMode}>

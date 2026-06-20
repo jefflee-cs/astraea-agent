@@ -39,3 +39,43 @@ test('unknown non-local model is unpriced (null), not guessed', () => {
 test('prefix match handles dated-snapshot suffixes', () => {
   expect(lookupPrice('claude-haiku-4-5-20251001')).toEqual({ inputPerMTok: 1, outputPerMTok: 5 })
 })
+
+// ── AC1: provider-aware cache multipliers ──
+
+test('OpenAI cached input billed 0.5x of input price', () => {
+  // gpt-4o input $2.50/MTok → 1M cache_read = $2.50 * 0.5 = $1.25
+  const { usd, local } = computeCost('gpt-4o', 'openai', {
+    input: 0, output: 0, cacheRead: 1_000_000, cacheCreation: 0,
+  })
+  expect(local).toBe(false)
+  expect(usd).toBeCloseTo(1.25, 6)
+})
+
+test('DeepSeek cache-hit billed 0.25x of input price', () => {
+  // deepseek-chat input $0.27/MTok → 1M cache_read = $0.27 * 0.25 = $0.0675
+  const { usd } = computeCost('deepseek-chat', 'deepseek', {
+    input: 0, output: 0, cacheRead: 1_000_000, cacheCreation: 0,
+  })
+  expect(usd).toBeCloseTo(0.0675, 6)
+})
+
+test('OpenAI & DeepSeek cache-WRITE (creation) costs $0 (no write surcharge)', () => {
+  // cache_creation should add nothing for either provider (cacheWriteMult: 0)
+  const openai = computeCost('gpt-4o', 'openai', {
+    input: 0, output: 0, cacheRead: 0, cacheCreation: 1_000_000,
+  })
+  expect(openai.usd).toBeCloseTo(0, 6)
+  const deepseek = computeCost('deepseek-chat', 'deepseek', {
+    input: 0, output: 0, cacheRead: 0, cacheCreation: 1_000_000,
+  })
+  expect(deepseek.usd).toBeCloseTo(0, 6)
+})
+
+test('Anthropic cache multipliers unchanged (0.1 read / 1.25 write) via per-model defaults', () => {
+  // Anthropic entries omit cacheReadMult/cacheWriteMult → fall back to module constants.
+  const { usd } = computeCost('claude-opus-4-8', 'anthropic', {
+    input: 0, output: 0, cacheRead: 1_000_000, cacheCreation: 1_000_000,
+  })
+  // $5 base → read $5*0.1=$0.50, write $5*1.25=$6.25
+  expect(usd).toBeCloseTo(0.5 + 6.25, 6)
+})
