@@ -11,6 +11,8 @@
 
 import { config, activeContextWindow } from '../config'
 import type { Command, LocalJsxCommand, LocalCommand, CommandAction } from './types'
+import { getUsageStats } from '../state/usageStats'
+import { computeCost } from '../api/pricing'
 
 function jsx(
   name: string,
@@ -122,6 +124,43 @@ export function getBuiltinCommands(): Command[] {
         `**Context window:** ${activeContextWindow().toLocaleString()} tokens`,
       ]
       return { type: 'text', value: lines.join('\n') }
+    }),
+
+    local('usage', 'show session token usage & cost (USD)', async () => {
+      const rows = getUsageStats()
+      if (rows.length === 0) {
+        return { type: 'text', value: 'No model usage yet this session.' }
+      }
+
+      const tok = (n: number) =>
+        n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M`
+          : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k`
+          : String(n)
+
+      const modelW = Math.max(...rows.map(r => r.model.length))
+      let totalTokens = 0
+      let totalUsd = 0
+      let anyUnpriced = false
+
+      const lines = rows.map(r => {
+        const cache = r.cacheRead + r.cacheCreation
+        totalTokens += r.input + r.output + cache
+        const { usd, local } = computeCost(r.model, r.provider, {
+          input: r.input, output: r.output, cacheRead: r.cacheRead, cacheCreation: r.cacheCreation,
+        })
+        let costStr: string
+        if (local) costStr = 'local·free'
+        else if (usd === null) { anyUnpriced = true; costStr = '— (unpriced)' }
+        else { totalUsd += usd; costStr = `$${usd.toFixed(2)}` }
+        return `  ${r.model.padEnd(modelW)}  in ${tok(r.input).padStart(6)}  out ${tok(r.output).padStart(6)}  cache ${tok(cache).padStart(6)}  ${costStr}`
+      })
+
+      const parts = ['**Session usage**', '', ...lines, '',
+        `  Total  ${tok(totalTokens)} tokens · $${totalUsd.toFixed(2)} USD`]
+      if (anyUnpriced) {
+        parts.push('', '  Some models are unpriced — add them to `src/api/pricing.ts` to include their cost.')
+      }
+      return { type: 'text', value: parts.join('\n') }
     }),
 
     local('help', 'show available commands', async () => {

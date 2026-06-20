@@ -6,21 +6,31 @@ import { streamMessageDeepSeek } from './deepseek'
 import { streamMessageOllama } from './ollama'
 import { streamMessageOpenAI, resetOpenAIClient } from './openai'
 import { resetAnthropicClient } from './client'
+import { recordUsage } from '../state/usageStats'
 
 export type { StreamOptions } from './anthropic'
 
+type StreamOpts = { system?: string; enablePromptCaching?: boolean; tools?: import('../tools/Tool').ToolSchema[]; abortSignal?: AbortSignal; maxTokens?: number; model?: string }
+
+function dispatch(messages: Message[], options: StreamOpts): AsyncGenerator<StreamEvent> {
+  if (config.provider === 'deepseek') return streamMessageDeepSeek(messages, options)
+  if (config.provider === 'ollama') return streamMessageOllama(messages, options)
+  if (config.provider === 'openai') return streamMessageOpenAI(messages, options)
+  return streamMessageAnthropic(messages, options)
+}
+
 export async function* streamMessage(
   messages: Message[],
-  options: { system?: string; enablePromptCaching?: boolean; tools?: import('../tools/Tool').ToolSchema[]; abortSignal?: AbortSignal; maxTokens?: number; model?: string } = {},
+  options: StreamOpts = {},
 ): AsyncGenerator<StreamEvent> {
-  if (config.provider === 'deepseek') {
-    yield* streamMessageDeepSeek(messages, options)
-  } else if (config.provider === 'ollama') {
-    yield* streamMessageOllama(messages, options)
-  } else if (config.provider === 'openai') {
-    yield* streamMessageOpenAI(messages, options)
-  } else {
-    yield* streamMessageAnthropic(messages, options)
+  // 这是所有 LLM 调用的唯一收口：主对话 / 子 agent / 记忆提取 / 压缩摘要都穿过它。
+  // 在此拦截 message_stop 的 usage 累加进 session 级用量（/usage 读它），零遗漏。
+  // 解析出本次实际生效的 provider + 模型，给用量打准确标签 → 喂价目表算钱。
+  const provider = config.provider
+  const model = options.model ?? (config as unknown as Record<string, { model?: string }>)[provider]?.model ?? 'unknown'
+  for await (const event of dispatch(messages, options)) {
+    if (event.type === 'message_stop') recordUsage(model, provider, event.usage)
+    yield event
   }
 }
 

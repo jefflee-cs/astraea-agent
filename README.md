@@ -42,7 +42,8 @@ It runs in your terminal as either a **persistent REPL** (multi-turn, React Ink 
 | **Vigil scheduling** | Schedule one-off or recurring agent tasks that run headless via a background daemon. |
 | **Memory & compaction** | Persistent file-based memory injection, prompt-cache-aware system prompts, and automatic context compaction. |
 | **WeChat integration** | Read and write WeChat conversations through driven automation. |
-| **Web search** | Pluggable providers — **Tavily**, **Brave**, or **Exa** semantic search. |
+| **Web search** | Pluggable providers — configure interactively with `/internet`. China-direct **Bocha** & **Zhipu** (no proxy), plus **Tavily**, **Brave**, and **Exa** semantic search. |
+| **Multilingual UI** | Switch the interface *and* reply language with `/language` — English, German, French, Spanish, Chinese, Korean. Auto-detects your system locale on first run; hot-applies with no restart. |
 
 ---
 
@@ -137,13 +138,20 @@ DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxx
 
 > **Tip:** Personal API keys (search providers, etc.) can live in a global `~/.astraea/.env`, so every Astraea project reuses them and you never risk committing a secret. Create it with `mkdir -p ~/.astraea`.
 
-Optional — enable web search by adding one of these to `~/.astraea/.env`:
+Optional — enable web search. The easiest way is the in-REPL `/internet` wizard (pick a provider, paste the key, it's saved to `~/.astraea/.env` for you). Or set one of these manually:
 
 ```bash
-TAVILY_API_KEY=tvly-xxx        # 1,000 req/mo, built for AI agents (recommended)
+# China-direct (no proxy needed) — recommended for users in mainland China
+BOCHA_API_KEY=sk-xxx           # 博查 Bocha — built for AI agents
+# ZHIPU_API_KEY=xxx            # 智谱 BigModel — reuse an existing Zhipu key
+
+# Global (proxy typically required in mainland China)
+# TAVILY_API_KEY=tvly-xxx      # 1,000 req/mo, built for AI agents
 # BRAVE_SEARCH_API_KEY=BSA-xxx # 2,000 req/mo
 # EXA_API_KEY=xxx              # 1,000 req/mo, semantic search for research
 ```
+
+The auto-detect chain prefers China-direct providers first (Bocha → Zhipu → Brave → Tavily → Exa), so a single configured key just works.
 
 ---
 
@@ -170,6 +178,19 @@ You'll see the active provider and model printed on startup, then a prompt. Just
 ```
 astraea › refactor src/query.ts to extract the streaming loop into its own module
 ```
+
+### In-REPL configuration
+
+You can configure everything interactively — no need to hand-edit `.env`. On **first launch** (no provider key yet), Astraea walks you through two steps automatically: **`/login`** to pick a model provider, then **`/language`** to choose your language. Afterwards, these slash commands are available anytime:
+
+| Command | What it does |
+|---------|--------------|
+| `/login` | Choose provider + model and paste the API key. Saved and applied live. |
+| `/internet` | Choose a web-search provider (Bocha · Zhipu · Tavily · Brave · Exa) and paste the key. Saved to `~/.astraea/.env`. |
+| `/language` | Switch UI + reply language (English · Deutsch · Français · Español · 中文 · 한국어). Applies instantly, no restart. Also accepts a direct arg, e.g. `/language en`. |
+| `/help` | List all available commands and skills. |
+
+> Type `/` to open the command picker with inline autocomplete.
 
 ### One-shot CLI
 
