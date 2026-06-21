@@ -54,3 +54,24 @@ export function mapDeepSeekUsage(usage: OpenAI.CompletionUsage): MappedUsage {
     cacheCreation: 0,
   }
 }
+
+// Kimi（Moonshot）OpenAI 兼容 usage。其上下文缓存命中可能出现在
+// prompt_tokens_details.cached_tokens（OpenAI 标准位）或顶层 cached_tokens（Moonshot 旧字段）。
+type KimiUsage = OpenAI.CompletionUsage & { cached_tokens?: number }
+
+/**
+ * Kimi：prompt_tokens 含命中缓存。cacheRead 取 prompt_tokens_details.cached_tokens，
+ * 缺失则回退顶层 cached_tokens（再缺失为 0）。input = prompt_tokens - cacheRead。
+ * Moonshot 命中缓存无单独写入费 → cacheCreation 恒 0。
+ */
+export function mapKimiUsage(usage: OpenAI.CompletionUsage): MappedUsage {
+  const u = usage as KimiUsage
+  const prompt = u.prompt_tokens || 0
+  const cacheRead = u.prompt_tokens_details?.cached_tokens ?? u.cached_tokens ?? 0
+  return {
+    input: prompt - cacheRead,
+    output: u.completion_tokens || 0,
+    cacheRead,
+    cacheCreation: 0,
+  }
+}

@@ -87,6 +87,9 @@ export function getBuiltinCommands(): Command[] {
 
     jsx('resume', 'resume a past session', () => ({ kind: 'resume-picker' })),
 
+    jsx('rewind', 'rewind this session: restore conversation + edited files',
+      args => ({ kind: 'rewind-picker', args: args?.trim() }), { argumentHint: '[turn#]' }),
+
     local('mcp', 'show MCP server connection status', async () => {
       const { getMcpStatus, isMcpInitialized } = await import('../mcp/registry')
       if (!isMcpInitialized()) return { type: 'text', value: 'MCP not initialized yet (connecting at startup).' }
@@ -112,6 +115,25 @@ export function getBuiltinCommands(): Command[] {
       parts.push(mps.length ? mps.map(m => `  ${m.name} (${m.pluginCount} plugins)`).join('\n') : '  (none — add with `astraea plugin marketplace add <dir>`)')
       parts.push('', '**Installed plugins:**')
       parts.push(records.length ? records.map(r => `  ${r.enabled ? '✓' : '○'} ${r.pluginId} v${r.version} [${r.scope}]`).join('\n') : '  (none)')
+      return { type: 'text', value: parts.join('\n') }
+    }),
+
+    local('reload-plugins', 'hot-reload skills & plugins (no restart needed)', async () => {
+      const { reloadPlugins } = await import('../plugins/init')
+      const { getCommands } = await import('./registry')
+      const status = reloadPlugins()
+      const skills = getCommands().filter(c => c.source !== 'builtin')
+      const bySource = (s: string) => skills.filter(c => c.source === s).length
+      const loaded = status.filter(s => s.state === 'loaded')
+      const failed = status.filter(s => s.state === 'failed')
+      const parts: string[] = [
+        '**Reloaded skills & plugins**',
+        '',
+        `  Skills available: ${skills.length}  (user ${bySource('user')} · project ${bySource('project')} · plugin ${bySource('plugin')})`,
+        `  Plugins: ${loaded.length} loaded${failed.length ? ` · ${failed.length} failed` : ''}`,
+      ]
+      for (const f of failed) parts.push(`    ✗ ${f.name}: ${f.error ?? 'unknown'}`)
+      parts.push('', '_New skills take effect from your next message. Plugin MCP server connections still need a restart._')
       return { type: 'text', value: parts.join('\n') }
     }),
 

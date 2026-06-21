@@ -7,7 +7,7 @@ import { listEnabledInstalled } from './installedManager'
 import { createPluginFromPath, type LoadedPlugin } from './pluginLoader'
 import { collectPluginSkills } from './loadPluginSkills'
 import { collectPluginMcpServers } from './mcpPluginIntegration'
-import { _setPluginSkillSource } from '../commands/registry'
+import { _setPluginSkillSource, resetCommandsCache } from '../commands/registry'
 import { _setPluginMcpSource } from '../mcp/config'
 
 export interface PluginStatus {
@@ -49,3 +49,16 @@ export function initPlugins(): void {
 export function getLoadedPlugins(): LoadedPlugin[] { return _loaded }
 export function getPluginStatus(): PluginStatus[] { return _status }
 export function isPluginsInitialized(): boolean { return _initialized }
+
+/**
+ * 热重载（供 /reload-plugins）：重读 installed_plugins.json、重载启用的插件、重注吸管，
+ * 并清空命令表缓存 —— user / project / plugin 三来源的 skill 都会在下一轮 getCommands() 重扫，
+ * 新加的 skill 无需重启即可在「下一条消息」生效。
+ *
+ * 不在覆盖范围：插件携带的 MCP server 连接（已连的保持，新增/变更仍需重启 initMcp 才会重连）。
+ */
+export function reloadPlugins(): PluginStatus[] {
+  initPlugins()        // 重读记录 + 重载插件卡 + 重注吸管（其内部 _setPluginSkillSource 已会清缓存）
+  resetCommandsCache() // 显式再清一次：不依赖 setter 的副作用，确保 user/project skill 目录也被重扫
+  return _status
+}

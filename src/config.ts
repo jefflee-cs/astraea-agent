@@ -51,13 +51,14 @@ applySettingsEnv()         // 先吃 settings.json 的 env，让它占位（shel
 loadEnvFile(envPath)       // 再加载项目级，只填它没设的 key
 loadEnvFile(globalEnvPath) // 最后全局，只填仍缺的 key
 
-export type Provider = 'anthropic' | 'deepseek' | 'ollama' | 'openai'
+export type Provider = 'anthropic' | 'deepseek' | 'kimi' | 'ollama' | 'openai'
 
 function detectProvider(): Provider {
   const raw = process.env.PROVIDER?.toLowerCase()
   if (raw === 'ollama') return 'ollama'
   if (raw === 'openai') return 'openai'
   if (raw === 'deepseek') return 'deepseek'
+  if (raw === 'kimi' || raw === 'moonshot') return 'kimi'
   return 'anthropic'
 }
 
@@ -125,6 +126,18 @@ export const config = {
     contextWindow: contextWindowFrom('DEEPSEEK_CONTEXT_WINDOW', 128_000),
   },
 
+  // Kimi（Moonshot AI）— OpenAI-compatible API
+  // 国内默认走 api.moonshot.cn；海外可用 KIMI_BASE_URL=https://api.moonshot.ai/v1 覆盖。
+  kimi: {
+    apiKey: process.env.KIMI_API_KEY ?? process.env.MOONSHOT_API_KEY ?? '',
+    model: process.env.KIMI_MODEL ?? 'kimi-k2-0905-preview',
+    baseUrl: process.env.KIMI_BASE_URL ?? 'https://api.moonshot.cn/v1',
+    // kimi-k2 输出上限较高，保守默认 8192，按需用 KIMI_MAX_TOKENS 调高。
+    maxTokens: maxTokensFrom('KIMI_MAX_TOKENS', 8192),
+    // kimi-k2 上下文窗口 256K；moonshot-v1-128k 等较小，按实际模型用 KIMI_CONTEXT_WINDOW 调。
+    contextWindow: contextWindowFrom('KIMI_CONTEXT_WINDOW', 256_000),
+  },
+
   // Ollama（本地）
   ollama: {
     baseUrl: process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434/v1',
@@ -152,6 +165,7 @@ export const config = {
 export function activeContextWindow(): number {
   switch (config.provider) {
     case 'deepseek': return config.deepseek.contextWindow
+    case 'kimi':     return config.kimi.contextWindow
     case 'ollama':   return config.ollama.contextWindow
     case 'openai':   return config.openai.contextWindow
     default:         return config.anthropic.contextWindow
@@ -161,6 +175,7 @@ export function activeContextWindow(): number {
 export function activeMaxTokens(): number {
   switch (config.provider) {
     case 'deepseek': return config.deepseek.maxTokens
+    case 'kimi':     return config.kimi.maxTokens
     case 'ollama':   return config.ollama.maxTokens
     case 'openai':   return config.openai.maxTokens
     default:         return config.anthropic.maxTokens
@@ -173,6 +188,7 @@ export function hasValidConfig(): boolean {
   switch (config.provider) {
     case 'anthropic': return !!config.anthropic.apiKey
     case 'deepseek':  return !!config.deepseek.apiKey
+    case 'kimi':      return !!config.kimi.apiKey
     case 'openai':    return !!config.openai.apiKey
     case 'ollama':    return true
     default:          return false
@@ -186,6 +202,10 @@ export function assertConfig(): void {
   }
   if (config.provider === 'deepseek' && !config.deepseek.apiKey) {
     console.error('Error: DEEPSEEK_API_KEY is not set (or run /login)')
+    process.exit(1)
+  }
+  if (config.provider === 'kimi' && !config.kimi.apiKey) {
+    console.error('Error: KIMI_API_KEY is not set (or run /login)')
     process.exit(1)
   }
   if (config.provider === 'openai' && !config.openai.apiKey) {
@@ -204,6 +224,10 @@ export function updateProviderConfig(provider: Provider, model: string, apiKey: 
     case 'deepseek':
       config.deepseek.apiKey = apiKey
       config.deepseek.model = model
+      break
+    case 'kimi':
+      config.kimi.apiKey = apiKey
+      config.kimi.model = model
       break
     case 'openai':
       config.openai.apiKey = apiKey
@@ -296,6 +320,11 @@ export async function saveConfigToEnv(): Promise<void> {
     '# ─── DeepSeek ───────────────────────────────────────────',
     `DEEPSEEK_API_KEY=${config.deepseek.apiKey}`,
     `DEEPSEEK_MODEL=${config.deepseek.model}`,
+    '',
+    '# ─── Kimi（Moonshot AI）─────────────────────────────────',
+    `KIMI_API_KEY=${config.kimi.apiKey}`,
+    `KIMI_MODEL=${config.kimi.model}`,
+    `KIMI_BASE_URL=${config.kimi.baseUrl}`,
     '',
     '# ─── Ollama（本地）────────────────────────────────────────',
     `# OLLAMA_BASE_URL=${config.ollama.baseUrl}`,

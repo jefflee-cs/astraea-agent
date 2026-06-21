@@ -36,6 +36,7 @@ const PROVIDER_SPAN_NAMES: Record<string, string> = {
   anthropic: 'ChatAnthropic',
   openai: 'ChatOpenAI',
   deepseek: 'ChatDeepSeek',
+  kimi: 'ChatKimi',
   ollama: 'ChatOllama',
 }
 
@@ -43,6 +44,8 @@ function activeModel(): string {
   switch (config.provider) {
     case 'deepseek':
       return config.deepseek.model
+    case 'kimi':
+      return config.kimi.model
     case 'ollama':
       return config.ollama.model
     case 'openai':

@@ -104,7 +104,11 @@ async function main() {
     ? config.anthropic.model
     : provider === 'openai'
       ? config.openai.model
-      : config.ollama.model
+      : provider === 'deepseek'
+        ? config.deepseek.model
+        : provider === 'kimi'
+          ? config.kimi.model
+          : config.ollama.model
 
   console.error(`[provider] ${provider} / ${modelId}`)
 
@@ -161,7 +165,10 @@ async function runHeadlessTask(taskId: string, prompt: string, resultFile?: stri
   const tools = listTools()
   const enabledTools = new Set(tools.map(t => t.name))
   const modelId = provider === 'anthropic' ? config.anthropic.model
-    : provider === 'openai' ? config.openai.model : config.ollama.model
+    : provider === 'openai' ? config.openai.model
+    : provider === 'deepseek' ? config.deepseek.model
+    : provider === 'kimi' ? config.kimi.model
+    : config.ollama.model
 
   console.error(`[vigil:headless] task=${taskId}`)
 

@@ -65,6 +65,15 @@ import { scheduleHousekeeping } from '../services/transcript/housekeeping'
 import { resetEclipse } from '../services/eclipse/store'
 import { setLastAssistantTs, resetMicrocompactState } from '../state/microcompactState'
 import { ResumePicker } from './ResumePicker'
+import { RewindPicker } from './RewindPicker'
+import {
+  beginCheckpoint,
+  listCheckpoints,
+  getCheckpoint,
+  applyRestore,
+  resetCheckpoints,
+  type Checkpoint,
+} from '../services/rewind/checkpointStore'
 import {
   resetContextTokens,
   markTokensUnknown,
@@ -345,6 +354,9 @@ export function App() {
   const [pendingResumePicker, setPendingResumePicker] = useState(false)
   const [resumePickerIndex, setResumePickerIndex] = useState(0)
   const resumeSessionsRef = useRef<SessionSummary[]>([])
+  const [pendingRewindPicker, setPendingRewindPicker] = useState(false)
+  const [rewindPickerIndex, setRewindPickerIndex] = useState(0)
+  const rewindCheckpointsRef = useRef<Checkpoint[]>([])
   // Slash 命令选择器：高亮项索引。slashIndexRef 供 handleSubmit 同步读取（避免入 deps）。
   const [slashIndex, setSlashIndex] = useState(0)
   const slashIndexRef = useRef(0)
@@ -395,7 +407,9 @@ export function App() {
         ? config.openai.model
         : p === 'deepseek'
           ? config.deepseek?.model ?? ''
-          : config.anthropic.model
+          : p === 'kimi'
+            ? config.kimi?.model ?? ''
+            : config.anthropic.model
     // configVersion 在 /login 后变化，触发 modelId 重算（config 是模块级可变对象，
     // 非 React state，必须靠版本号手动让 memo 失效）
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -599,6 +613,7 @@ export function App() {
     conversationRef.current = msgs
     loggedLenRef.current = msgs.length
     transcriptRef.current = reopenTranscript(process.cwd(), target.sessionId)
+    resetCheckpoints()  // 切到别的会话 → 当前会话的 /rewind 检查点全部作废
     markTokensUnknown()
     // microcompact：从 transcript 回填最后一条 assistant 时间，让 resume 后首轮也能算 gap。
     { const ts = getLastAssistantTimestamp(target.path); if (ts !== null) setLastAssistantTs(ts) }
@@ -607,6 +622,32 @@ export function App() {
       { id: 'welcome', role: 'welcome', text: '' },
       ...rebuildHistoryEntries(msgs, () => String(entryIdRef.current++)),
       { id: String(entryIdRef.current++), role: 'assistant', text: `◎ resumed session — ${msgs.length} messages restored. Continue where you left off.` },
+    ])
+  }, [wipeStatic])
+
+  // ── /rewind — 会话内时间倒流：回滚对话 + Write/Edit 改过的文件到第 turn 回合之前 ──
+  const rewindTo = useCallback((turn: number) => {
+    const res = applyRestore(turn)  // 先还原文件 + 丢弃 >=turn 的检查点/快照
+    if (!res) {
+      setHistory(prev => [...prev, { id: String(entryIdRef.current++), role: 'assistant', text: `⚠ /rewind — checkpoint #${turn} not found.` }])
+      return
+    }
+    // 对话三层同步：内存截断 → transcript 追加 rewind 标记（append-only）→ loggedLen 回退
+    const dropped = conversationRef.current.length - res.convLen
+    conversationRef.current = conversationRef.current.slice(0, res.convLen)
+    transcriptRef.current?.appendRewind(turn, res.convLen)
+    loggedLenRef.current = res.convLen
+    markTokensUnknown()
+    // 文件回滚回执
+    const fileBits: string[] = []
+    if (res.restored.length) fileBits.push(`${res.restored.length} file${res.restored.length === 1 ? '' : 's'} reverted`)
+    if (res.deleted.length) fileBits.push(`${res.deleted.length} created file${res.deleted.length === 1 ? '' : 's'} removed`)
+    const fileNote = fileBits.length ? ` · ${fileBits.join(', ')}` : ''
+    wipeStatic()  // 物理清屏 + 重挂载 Static，再铺回滚后的历史
+    setHistory([
+      { id: 'welcome', role: 'welcome', text: '' },
+      ...rebuildHistoryEntries(conversationRef.current, () => String(entryIdRef.current++)),
+      { id: String(entryIdRef.current++), role: 'assistant', text: `↩ rewound to checkpoint #${turn} — ${dropped} message${dropped === 1 ? '' : 's'} dropped${fileNote}.` },
     ])
   }, [wipeStatic])
 
@@ -631,6 +672,9 @@ export function App() {
 
       commandHistoryRef.current.push(displayText ?? promptText)
       historyIndexRef.current = -1
+      // /rewind 检查点：记录本回合用户消息追加「之前」的 conversationRef 长度。
+      // 必须在 conversationRef 被改动前取（done 事件才会写回），故置于本函数顶部。
+      beginCheckpoint({ convLen: conversationRef.current.length, userText: displayText ?? promptText })
       setInputValue('')
       setIsStreaming(true)
       setStreamingText('')
@@ -1107,11 +1151,13 @@ export function App() {
           p === 'ollama' ? config.ollama.baseUrl
           : p === 'openai' ? config.openai.baseUrl
           : p === 'deepseek' ? config.deepseek.baseUrl
+          : p === 'kimi' ? config.kimi.baseUrl
           : 'https://api.anthropic.com'
         const maxTokens =
           p === 'ollama' ? config.ollama.maxTokens
           : p === 'openai' ? config.openai.maxTokens
           : p === 'deepseek' ? config.deepseek.maxTokens
+          : p === 'kimi' ? config.kimi.maxTokens
           : config.anthropic.maxTokens
         setHistory(prev => [...prev, {
           id: String(entryIdRef.current++),
@@ -1152,6 +1198,7 @@ export function App() {
         resetContextTokens()                          // 清空上下文 token 计数 + 压缩熔断状态
         resetMicrocompactState()                      // 清空 microcompact 时间戳单例（新会话重新计时）
         resetEclipse()                                // 清空 Eclipse 折叠 store（跨会话不残留）
+        resetCheckpoints()                            // 清空 /rewind 检查点（新会话无可回滚点）
         transcriptRef.current = createTranscript(process.cwd())  // 新会话 → 新 transcript 文件
         loggedLenRef.current = 0
         for (const ns of getAllNamespaces()) clearTodos(ns)  // 清空所有命名空间的 todo
@@ -1276,6 +1323,33 @@ export function App() {
           return
         }
         restoreSession(target)
+        return
+      }
+
+      // ── /rewind — 会话内回滚（对话 + Write/Edit 文件，per-turn 粒度）──────────
+      if (trimmed === '/rewind' || trimmed.startsWith('/rewind ')) {
+        setInputValue('')
+        historyIndexRef.current = -1
+        const arg = trimmed.slice('/rewind'.length).trim()
+        const cps = listCheckpoints()
+        if (cps.length === 0) {
+          setHistory(prev => [...prev, { id: String(entryIdRef.current++), role: 'assistant', text: '◌ /rewind — no checkpoints yet in this session.' }])
+          return
+        }
+        if (!arg) {
+          // 无参 → 打开键盘 picker（↑↓ 选 · Enter 回滚 · Esc 取消）
+          rewindCheckpointsRef.current = cps
+          setRewindPickerIndex(0)
+          setPendingRewindPicker(true)
+          return
+        }
+        // /rewind N → 直接回滚到第 N 回合之前
+        const n = parseInt(arg, 10)
+        if (!Number.isFinite(n) || !getCheckpoint(n)) {
+          setHistory(prev => [...prev, { id: String(entryIdRef.current++), role: 'assistant', text: `⚠ /rewind — checkpoint #${arg} not found. Use /rewind to pick one.` }])
+          return
+        }
+        rewindTo(n)
         return
       }
 
@@ -1675,7 +1749,7 @@ export function App() {
 
   usePaste(
     ingestPaste,
-    { isActive: !showLogin && !showInternet && !showLanguage && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && !(pendingQuestion?.options?.length && !questionFreeText) },
+    { isActive: !showLogin && !showInternet && !showLanguage && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && !pendingRewindPicker && !(pendingQuestion?.options?.length && !questionFreeText) },
   )
 
   // Ctrl+V 兜底：部分 Windows 终端（conhost / PowerShell 控制台）按 Ctrl+V 不会触发
@@ -1738,6 +1812,22 @@ export function App() {
         const target = list[resumePickerIndex]
         setPendingResumePicker(false)
         if (target) restoreSession(target)
+        return
+      }
+      return // 吞掉其它按键
+    }
+
+    // ── RewindPicker 键盘控制 ─────────────────────────────────────────────────
+    if (pendingRewindPicker) {
+      const list = rewindCheckpointsRef.current
+      if (key.escape) { setPendingRewindPicker(false); return }
+      if (list.length === 0) { setPendingRewindPicker(false); return }
+      if (key.upArrow) { setRewindPickerIndex(i => (i - 1 + list.length) % list.length); return }
+      if (key.downArrow) { setRewindPickerIndex(i => (i + 1) % list.length); return }
+      if (key.return) {
+        const target = list[rewindPickerIndex]
+        setPendingRewindPicker(false)
+        if (target) rewindTo(target.turn)
         return
       }
       return // 吞掉其它按键
@@ -1963,10 +2053,12 @@ export function App() {
         ? config.openai.model
         : config.provider === 'deepseek'
           ? config.deepseek?.model ?? ''
-          : config.anthropic.model
+          : config.provider === 'kimi'
+            ? config.kimi?.model ?? ''
+            : config.anthropic.model
 
   // 执行中输入框保持可用（不锁定）：用户可随时 /mode 切换。仅在模式/面板覆盖层时让出焦点。
-  const inputFocused = !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker
+  const inputFocused = !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && !pendingRewindPicker
   const inputPlaceholder = pendingQuestion
     ? 'Type your answer… (Esc to skip)'
     : isStreaming
@@ -2238,6 +2330,14 @@ export function App() {
         />
       )}
 
+      {/* RewindPicker — 会话内回滚检查点选择器（/rewind） */}
+      {pendingRewindPicker && (
+        <RewindPicker
+          checkpoints={rewindCheckpointsRef.current}
+          selectedIndex={rewindPickerIndex}
+        />
+      )}
+
       {/* VigilPanel — 定时任务操作选择 */}
       {pendingVigilPanel && (
         <VigilPanel
@@ -2274,7 +2374,7 @@ export function App() {
           状态行应展示在 Tasks 列表下面，而非其上方）。 */}
       {isStreaming && <StreamStatus startTime={streamStart} tokens={liveTokens} />}
 
-      {!showLogin && !showInternet && !showLanguage && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && (
+      {!showLogin && !showInternet && !showLanguage && !pendingModeSelect && !pendingVigilPanel && !pendingConfirm && !pendingResumePicker && !pendingRewindPicker && (
         <ModeInputFrame mode={sessionMode}>
           {/* When a question with options is pending, hide the text input entirely —
               user navigates with ↑↓ + Enter just like the /mode selector.

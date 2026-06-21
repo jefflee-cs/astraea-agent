@@ -48,6 +48,12 @@ const PRICING: Record<string, ModelPrice> = {
   'deepseek-chat':     { inputPerMTok: 0.27, outputPerMTok: 1.10, cacheReadMult: 0.25, cacheWriteMult: 0 },
   'deepseek-reasoner': { inputPerMTok: 0.55, outputPerMTok: 2.19, cacheReadMult: 0.25, cacheWriteMult: 0 },
 
+  // ── Kimi / Moonshot（公开价目近似，请核对）。命中缓存读取 ≈0.25×，无写入费 ──
+  'kimi-k2-turbo':  { inputPerMTok: 1.15, outputPerMTok: 8.00, cacheReadMult: 0.25, cacheWriteMult: 0 },
+  'kimi-k2':        { inputPerMTok: 0.58, outputPerMTok: 2.29, cacheReadMult: 0.25, cacheWriteMult: 0 },
+  'kimi-latest':    { inputPerMTok: 0.58, outputPerMTok: 2.29, cacheReadMult: 0.25, cacheWriteMult: 0 },
+  'moonshot-v1':    { inputPerMTok: 1.68, outputPerMTok: 1.68, cacheReadMult: 0.25, cacheWriteMult: 0 },
+
   // ── OpenAI（公开价目近似，请核对）。自动缓存命中 0.5×，无写入费 ──
   'gpt-4o-mini':       { inputPerMTok: 0.15, outputPerMTok: 0.60, cacheReadMult: 0.5, cacheWriteMult: 0 },
   'gpt-4o':            { inputPerMTok: 2.50, outputPerMTok: 10,   cacheReadMult: 0.5, cacheWriteMult: 0 },

@@ -25,6 +25,7 @@ export type CommandActionKind =
   | 'internet-wizard'
   | 'language-wizard'
   | 'resume-picker'
+  | 'rewind-picker'
   | 'clear-history'
   | 'compact-now'
   | 'set-goal'

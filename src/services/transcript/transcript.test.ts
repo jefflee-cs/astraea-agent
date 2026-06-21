@@ -47,6 +47,29 @@ test('有 compact 标记 → 恢复 = 快照 + 标记之后的消息', () => {
   expect((restored[3] as AssistantMessage).content[0]).toMatchObject({ text: 'a3' })
 })
 
+test('有 rewind 标记 → 恢复按 convLen 截断后续重放', () => {
+  const w = createTranscript(TEST_CWD)
+  w.appendMessages([U('m1'), A('a1'), U('m2'), A('a2')]) // 4 条
+  w.appendRewind(2, 2)                                   // 回滚到回合2之前：截到 2 条
+  w.appendMessages([U('m2b'), A('a2b')])                 // 倒流后续写
+  const restored = loadSessionMessages(listSessions(TEST_CWD)[0]!.path)
+  expect(restored.length).toBe(4) // [m1,a1] + [m2b,a2b]
+  expect((restored[2] as UserMessage).content).toBe('m2b')
+  expect((restored[3] as AssistantMessage).content[0]).toMatchObject({ text: 'a2b' })
+})
+
+test('compact 与 rewind 交错 → 折叠顺序正确', () => {
+  const w = createTranscript(TEST_CWD)
+  w.appendMessages([U('m1'), A('a1')])
+  w.appendCompact([U('<conversation_summary>S</conversation_summary>'), A('a1')], 'S', 9000, 'auto') // 累加器=2
+  w.appendMessages([U('m2'), A('a2')])  // 4
+  w.appendRewind(99, 3)                 // 截到 3
+  w.appendMessages([A('a2redo')])       // 4
+  const restored = loadSessionMessages(listSessions(TEST_CWD)[0]!.path)
+  expect(restored.length).toBe(4)
+  expect((restored[3] as AssistantMessage).content[0]).toMatchObject({ text: 'a2redo' })
+})
+
 test('reopenTranscript 续写同一文件', () => {
   const w = createTranscript(TEST_CWD)
   w.appendMessages([U('first')])

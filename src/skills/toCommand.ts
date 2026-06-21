@@ -33,8 +33,23 @@ export function skillToCommand(skill: LoadedSkill): PromptCommand {
       } catch (err) {
         return [{ type: 'text', text: `[skill ${skill.name}] failed to read SKILL.md: ${String(err)}` }]
       }
+
+      // skill 的资源（references/ assets/ scripts/ 等）就在它自己的目录里，而 skill 多是
+      // **全局安装**（~/.astraea/skills/<name>），与 cwd 无关——Windows 上甚至可能不同盘符
+      // （cwd=E:\proj，skill=C:\Users\…）。若不告知绝对根，模型会把 `references/x.md` 这类
+      // 相对路径错按 cwd 解析 → 文件找不到。故：① 展开 <SKILL_ROOT> 占位符为绝对路径；
+      // ② 顶部显式声明 skill 目录，要求相对资源按它解析（而非 cwd）。
+      const root = skill.skillRoot
+      body = body.replace(/\$\{SKILL_ROOT\}|\{\{SKILL_ROOT\}\}|<SKILL_ROOT>|\$SKILL_ROOT/g, root)
+
       const header = `# Skill: ${skill.name}`
-      const text = args ? `${header}\n\n${body}\n\n---\n**Arguments:** ${args}` : `${header}\n\n${body}`
+      const locationNote =
+        `Skill directory (absolute): ${root}\n` +
+        `This skill's bundled files (e.g. references/, assets/, scripts/, templates/) live under that directory. ` +
+        `Resolve every relative path in the instructions below against it — NOT the current working directory. ` +
+        `When reading or copying those files, use the absolute path under the skill directory.`
+      const head = `${header}\n\n${locationNote}`
+      const text = args ? `${head}\n\n${body}\n\n---\n**Arguments:** ${args}` : `${head}\n\n${body}`
       return [{ type: 'text', text }]
     },
   }

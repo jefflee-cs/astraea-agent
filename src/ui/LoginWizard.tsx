@@ -21,6 +21,7 @@ interface ProviderOption {
 const PROVIDERS: ProviderOption[] = [
   { label: 'Anthropic', value: 'anthropic', hint: 'claude-opus / sonnet / haiku' },
   { label: 'DeepSeek', value: 'deepseek', hint: 'V4 chat · R1 reasoning' },
+  { label: 'Kimi (Moonshot)', value: 'kimi', hint: 'kimi-k2 · 256K context' },
   { label: 'OpenAI (GPT)', value: 'openai', hint: 'gpt-5.5 · gpt-5.4 · o3' },
 ]
 
@@ -36,6 +37,12 @@ const MODELS: Record<Exclude<Provider, 'ollama'>, ModelOption[]> = {
   deepseek: [
     { label: 'deepseek-chat', value: 'deepseek-chat', hint: 'mDsChat' },
     { label: 'deepseek-reasoner', value: 'deepseek-reasoner', hint: 'mDsReasoner' },
+  ],
+  kimi: [
+    { label: 'kimi-k2-0905-preview', value: 'kimi-k2-0905-preview', hint: 'mKimiK2' },
+    { label: 'kimi-k2-turbo-preview', value: 'kimi-k2-turbo-preview', hint: 'mKimiTurbo' },
+    { label: 'kimi-latest', value: 'kimi-latest', hint: 'mKimiLatest' },
+    { label: 'moonshot-v1-128k', value: 'moonshot-v1-128k', hint: 'mMoonshot128' },
   ],
   openai: [
     { label: 'gpt-5.5', value: 'gpt-5.5', hint: 'mGpt55' },

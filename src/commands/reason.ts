@@ -26,7 +26,7 @@ const HELP = [
   '  (no argument)         show the current effective level + its source',
   '',
   "Maps to each provider's native knob: OpenAI reasoning_effort · Anthropic thinking budget.",
-  'DeepSeek / Ollama have no per-request reasoning knob (no-op).',
+  'DeepSeek / Kimi / Ollama have no per-request reasoning knob (no-op).',
 ].join('\n')
 
 export function reasonHelp(): string {

@@ -114,6 +114,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     enterAction: 'execute',
   },
   {
+    name: '/rewind',
+    summary: 'rewind this session — restore conversation + edited files (↑↓ picker)',
+    options: [],
+    enterAction: 'execute',
+  },
+  {
     name: '/help',
     summary: 'show available commands',
     options: [],

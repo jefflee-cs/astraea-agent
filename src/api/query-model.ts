@@ -4,6 +4,7 @@
 //   anthropic → claude-haiku-4-5-20251001（最快最廉价）
 //   openai    → gpt-4o-mini（同等定位的 OpenAI 轻量模型）
 //   deepseek  → deepseek-chat（已足够快，无更小模型）
+//   kimi      → 使用配置的 kimi 模型（无更小模型）
 //   ollama    → 使用配置的本地模型
 
 import OpenAI from 'openai'
@@ -36,12 +37,14 @@ export async function querySmallModel(
     return block && 'text' in block ? block.text : ''
   }
 
-  // OpenAI-compatible providers (openai, deepseek, ollama)
+  // OpenAI-compatible providers (openai, deepseek, kimi, ollama)
   const clientCfg =
     provider === 'openai'
       ? { baseURL: config.openai.baseUrl, apiKey: config.openai.apiKey, model: OPENAI_SMALL_MODEL }
       : provider === 'deepseek'
       ? { baseURL: config.deepseek.baseUrl, apiKey: config.deepseek.apiKey, model: config.deepseek.model }
+      : provider === 'kimi'
+      ? { baseURL: config.kimi.baseUrl, apiKey: config.kimi.apiKey, model: config.kimi.model }
       : { baseURL: config.ollama.baseUrl, apiKey: 'ollama', model: config.ollama.model }
 
   const openaiClient = new OpenAI({ baseURL: clientCfg.baseURL, apiKey: clientCfg.apiKey, maxRetries: 5 })

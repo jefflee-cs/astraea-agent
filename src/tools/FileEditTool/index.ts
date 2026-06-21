@@ -15,6 +15,7 @@ import { checkWritePermission } from '../fileWriteGate'
 import { findActualString, preserveQuoteStyle, applyEdit, formatDiff } from './utils'
 import { styleDiffLine } from '../diffStyle'
 import { displayPath } from '../../utils/displayPath'
+import { captureFile } from '../../services/rewind/checkpointStore'
 
 export const FileEditTool = buildTool({
   name: 'Edit',
@@ -89,6 +90,7 @@ Common patterns:
     // ── 创建新文件：old_string 为空 + 文件不存在 ─────────────────────────────
     if (oldString === '' && !fileExists) {
       try {
+        captureFile(absolutePath) // /rewind：新建文件 → 记 null 前态（回滚即删除）
         mkdirSync(dirname(absolutePath), { recursive: true })
         writeFileSync(absolutePath, newString, 'utf8')
         recordWrite(absolutePath)
@@ -155,6 +157,7 @@ Common patterns:
 
     // ── 写入文件（同步，原子区结束）──────────────────────────────────────────
     try {
+      captureFile(absolutePath) // /rewind copy-on-write：记录改动前态（写盘前一刻）
       writeFileSync(absolutePath, updatedFile, 'utf8')
     } catch (err: unknown) {
       return { output: `Failed to write file: ${err}`, isError: true }

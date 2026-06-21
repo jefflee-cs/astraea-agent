@@ -76,7 +76,14 @@ interface CompactLine {
   summary: string
   snapshot: ConvMessage[] // 压缩后 conversationRef 快照（[摘要 + 最近]），供 /resume 精确恢复
 }
-type TranscriptLine = SessionHeaderLine | MessageLine | CompactLine
+interface RewindLine {
+  type: 'rewind'
+  uuid: string
+  timestamp: string
+  toTurn: number  // 回滚到的回合号（仅展示/审计用）
+  convLen: number // 回滚后 conversationRef 应有的长度——loadSessionMessages 据此截断
+}
+type TranscriptLine = SessionHeaderLine | MessageLine | CompactLine | RewindLine
 
 // ── Writer ───────────────────────────────────────────────────────────────────
 export interface TranscriptWriter {
@@ -85,6 +92,7 @@ export interface TranscriptWriter {
   readonly path: string
   appendMessages(msgs: ConvMessage[]): void
   appendCompact(snapshot: ConvMessage[], summary: string, preTokens: number, trigger: 'auto' | 'manual'): void
+  appendRewind(toTurn: number, convLen: number): void
 }
 
 const NOOP_WRITER: TranscriptWriter = {
@@ -93,11 +101,13 @@ const NOOP_WRITER: TranscriptWriter = {
   path: '',
   appendMessages() {},
   appendCompact() {},
+  appendRewind() {},
 }
 
 function activeModel(): string {
   switch (config.provider) {
     case 'deepseek': return config.deepseek.model
+    case 'kimi':     return config.kimi.model
     case 'ollama':   return config.ollama.model
     case 'openai':   return config.openai.model
     default:         return config.anthropic.model
@@ -161,6 +171,9 @@ function createTranscriptAt(sessionId: string, path: string): TranscriptWriter {
     appendCompact(snapshot, summary, preTokens, trigger) {
       writeLine(path, { type: 'compact', uuid: randomUUID(), timestamp: new Date().toISOString(), trigger, preTokens, summary, snapshot })
     },
+    appendRewind(toTurn, convLen) {
+      writeLine(path, { type: 'rewind', uuid: randomUUID(), timestamp: new Date().toISOString(), toTurn, convLen })
+    },
   }
 }
 
@@ -221,25 +234,24 @@ export function listSessions(cwd: string): SessionSummary[] {
 }
 
 /**
- * 从 transcript 恢复到「压缩态」（设计文档 §10）：
- * 从最后一个 compact 标记重放 = snapshot + 标记之后的消息行；无 compact 标记则全部消息行。
+ * 重放 transcript 还原 conversationRef（设计文档 §10 + /rewind）。
+ * 按行顺序折叠，两类标记改写累加器，正确处理 compact 与 rewind 的任意交错：
+ *   · compact —— 用 snapshot 整体替换累加器（[摘要 + 最近]）；
+ *   · rewind  —— 把累加器截到标记记录的 convLen（会话内时间倒流）；
+ *   · user/assistant —— 追加消息。
  */
 export function loadSessionMessages(path: string): ConvMessage[] {
-  const lines = parseLines(path)
-  let lastCompactIdx = -1
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i]!.type === 'compact') { lastCompactIdx = i; break }
+  let msgs: ConvMessage[] = []
+  for (const l of parseLines(path)) {
+    if (l.type === 'user' || l.type === 'assistant') {
+      msgs.push((l as MessageLine).message)
+    } else if (l.type === 'compact') {
+      msgs = [...(l as CompactLine).snapshot]
+    } else if (l.type === 'rewind') {
+      msgs = msgs.slice(0, (l as RewindLine).convLen)
+    }
   }
-  if (lastCompactIdx >= 0) {
-    const marker = lines[lastCompactIdx] as CompactLine
-    const after = lines.slice(lastCompactIdx + 1)
-      .filter((l): l is MessageLine => l.type === 'user' || l.type === 'assistant')
-      .map(l => l.message)
-    return [...marker.snapshot, ...after]
-  }
-  return lines
-    .filter((l): l is MessageLine => l.type === 'user' || l.type === 'assistant')
-    .map(l => l.message)
+  return msgs
 }
 
 /**

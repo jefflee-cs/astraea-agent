@@ -9,6 +9,7 @@ import type { Tool, ToolCallResult, ToolContext } from '../Tool'
 import { validateWrite, recordWrite } from '../readFileState'
 import { checkWritePermission } from '../fileWriteGate'
 import { styleDiffLine } from '../diffStyle'
+import { captureFile } from '../../services/rewind/checkpointStore'
 
 export const FileWriteTool = buildTool({
   name: 'Write',
@@ -50,6 +51,7 @@ IMPORTANT: If this is an existing file, you MUST use the Read tool first to read
 
     // ── 写入 ──────────────────────────────────────────────────────────────
     try {
+      captureFile(filePath) // /rewind copy-on-write：记录改动前态（写盘前一刻）
       await Bun.write(filePath, content)
       // 写后更新 readFileState，避免连续写入时被自己的 mtime 变化误判
       recordWrite(filePath)

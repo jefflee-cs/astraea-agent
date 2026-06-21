@@ -3,6 +3,7 @@ import { config } from '../config'
 import type { Message, StreamEvent } from '../types/message'
 import { streamMessageAnthropic } from './anthropic'
 import { streamMessageDeepSeek } from './deepseek'
+import { streamMessageKimi } from './kimi'
 import { streamMessageOllama } from './ollama'
 import { streamMessageOpenAI, resetOpenAIClient } from './openai'
 import { resetAnthropicClient } from './client'
@@ -14,6 +15,7 @@ type StreamOpts = { system?: string; enablePromptCaching?: boolean; tools?: impo
 
 function dispatch(messages: Message[], options: StreamOpts): AsyncGenerator<StreamEvent> {
   if (config.provider === 'deepseek') return streamMessageDeepSeek(messages, options)
+  if (config.provider === 'kimi') return streamMessageKimi(messages, options)
   if (config.provider === 'ollama') return streamMessageOllama(messages, options)
   if (config.provider === 'openai') return streamMessageOpenAI(messages, options)
   return streamMessageAnthropic(messages, options)
